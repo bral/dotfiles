@@ -24,6 +24,7 @@ local hsAlert    = hs.alert
 local hsConsole  = hs.console
 local hsReload   = hs.reload
 local hsWatcher  = hs.application.watcher
+local hsScreenWatcher = hs.screen.watcher
 local strFmt     = string.format
 local tblInsert  = table.insert
 local printFn    = print
@@ -45,12 +46,13 @@ Config.hyper = {"cmd", "alt", "ctrl", "shift"}
 
 Config.debug = {
   enabled = false,         -- Switch to false for max speed (no logs/metrics)
-  logLevel = "error"      -- "info", "debug", "warning", "error"
+  logLevel = "error",      -- "info", "debug", "warning", "error"
+  performanceProfiling = false  -- Disable detailed timing logs
 }
 
 -- Removed mouse centering option
 Config.throttleTime = 0.001  -- Reduced from 0.01 to improve responsiveness
-Config.debounceTime = 0.08  -- Seconds to debounce window operations
+Config.debounceTime = 0.02  -- Reduced for rapid switching (was 0.08)
 
 Config.appHotkeys = {
   { key = "C", app = "Calendar" },
@@ -135,9 +137,15 @@ local Utils = {}
 -- Metrics tracking
 Utils.metrics = {
   windowOps = { count = 0, totalTime = 0 },
-  appSwitches = { count = 0, totalTime = 0 },
+  appSwitches = { count = 0, totalTime = 0, lastTime = 0 },
   cacheHits = 0,
-  cacheMisses = 0
+  cacheMisses = 0,
+  cacheCorruptions = 0,
+  instantFocusHits = 0,
+  instantFocusMisses = 0,
+  debounceSkips = 0,
+  validationCalls = 0,
+  validationTime = 0
 }
 
 -- Logging
@@ -594,48 +602,32 @@ end
 local lastWindowOpTime = 0
 -- WIN_DEBOUNCE_NS is now defined globally with other cached config values
 
--- Enhanced screen frame caching with per-screen expiry
-WindowManagement.screenFrameCache = {}
-local screenExpiryCache = {} -- Per-screen expiry timestamps
-local SCREEN_CACHE_TTL_NS = 5000000000 -- 5 seconds in nanoseconds
+-- App switching debouncing to prevent rapid switching overhead
+local lastAppSwitchTime = 0
+local APP_SWITCH_DEBOUNCE_NS = 50000000 -- 50ms in nanoseconds
 
--- Cache most common screen layouts to avoid even lookups
+-- Simplified screen frame caching with event-based invalidation
+WindowManagement.screenFrameCache = {}
 local commonScreenLayouts = {}
-local screenLayoutsExpiry = 0
+local screenWatcher = nil
 
 function WindowManagement.getScreenFrame(screen)
-  local currentTime = hsTimer.absoluteTime()
   local screenID = screen:id()
 
-  -- Aggressively cache primary screen, it's used most often
-  -- Check if this is the primary screen by comparing with hs.screen.primaryScreen()
-  if screen == hs.screen.primaryScreen() then
-    -- Try common layouts first (ultra fast)
-    if currentTime - screenLayoutsExpiry < SCREEN_CACHE_TTL_NS and
-       commonScreenLayouts.primary then
-      return commonScreenLayouts.primary
-    end
-  end
-
-  -- Check if we have a valid cached frame with per-screen expiry
-  if WindowManagement.screenFrameCache[screenID] and
-     screenExpiryCache[screenID] and
-     currentTime - screenExpiryCache[screenID] < SCREEN_CACHE_TTL_NS then
+  -- Check if we have a cached frame
+  if WindowManagement.screenFrameCache[screenID] then
     return WindowManagement.screenFrameCache[screenID]
   end
 
-  -- Get fresh frame and cache it with its own timestamp
+  -- Get fresh frame and cache it
   local frame = screen:frame()
   WindowManagement.screenFrameCache[screenID] = frame
-  screenExpiryCache[screenID] = currentTime
 
-  -- If this is primary screen, cache in common layouts too
+  -- If this is primary screen, cache all common window positions
   if screen == hs.screen.primaryScreen() then
     commonScreenLayouts.primary = frame
-    screenLayoutsExpiry = currentTime
-
-    -- Pre-compute and cache common window positions
-    -- This avoids thousands of calculations during window operations
+    
+    -- Pre-compute all commonly used layouts for maximum performance
     commonScreenLayouts.leftHalf = {
       x = frame.x,
       y = frame.y,
@@ -670,9 +662,20 @@ function WindowManagement.getScreenFrame(screen)
       w = frame.w - (frame.w >> 2),
       h = frame.h - (frame.h >> 2)
     }
+
+    commonScreenLayouts.max = frame
   end
 
   return frame
+end
+
+-- Function to invalidate screen caches when screens change
+local function invalidateScreenCaches()
+  WindowManagement.screenFrameCache = {}
+  commonScreenLayouts = {}
+  if Utils.debugEnabled then
+    Utils.log("debug", "Screen caches invalidated due to screen configuration change")
+  end
 end
 
 -- Direct accessor functions for common layouts (zero computation)
@@ -696,6 +699,10 @@ WindowManagement.getCenterLayout = function()
   return commonScreenLayouts.center
 end
 
+WindowManagement.getMaxLayout = function()
+  return commonScreenLayouts.max
+end
+
 -- Fast path information for even more optimization
 local lastDirection = nil
 local lastWindow = nil
@@ -709,7 +716,7 @@ function WindowManagement.moveWindow(direction)
   if not scr then return end
 
   -- Ultra-fast path: If same window and same direction as last time, and it worked
-  -- This completely skips layout calculations for repeated operations
+  -- This completely skips all calculations and reuses the last frame directly
   if useFrequentLayoutCache and lastWindow == win and lastDirection == direction and lastSuccess then
     -- Debounce still applies
     local currentTime = hsTimer.absoluteTime()
@@ -723,11 +730,8 @@ function WindowManagement.moveWindow(direction)
       Utils.log("debug", "Ultra-fast path: Reusing last successful window operation")
     end
 
-    -- Execute same operation again
-    -- Always get a valid frame for the screen to avoid nil errors
-    local frame = WindowManagement.getScreenFrame(scr)
-    local layout = WindowManagement.layout -- Cache layout table locally
-    layout[direction](frame, win, true) -- Pass frame and true to indicate reuse
+    -- Reuse the exact same frame that worked last time
+    win:setFrame(lastWindow:frame())
     return
   end
 
@@ -744,25 +748,58 @@ function WindowManagement.moveWindow(direction)
   -- Check if we can use pre-computed layouts for primary screen
   local usePrimary = scr == hs.screen.primaryScreen()
   local frame
+  local success = false
 
-  if usePrimary and direction == "left" and WindowManagement.getLeftHalfLayout then
-    frame = WindowManagement.getLeftHalfLayout()
-  elseif usePrimary and direction == "right" and WindowManagement.getRightHalfLayout then
-    frame = WindowManagement.getRightHalfLayout()
-  elseif usePrimary and direction == "up" and WindowManagement.getTopHalfLayout then
-    frame = WindowManagement.getTopHalfLayout()
-  elseif usePrimary and direction == "down" and WindowManagement.getBottomHalfLayout then
-    frame = WindowManagement.getBottomHalfLayout()
-  elseif usePrimary and direction == "center" and WindowManagement.getCenterLayout then
-    frame = WindowManagement.getCenterLayout()
-  else
-    -- Fall back to normal frame calculation
-    frame = WindowManagement.getScreenFrame(scr)
+  if usePrimary then
+    -- Ensure screen cache is populated first
+    WindowManagement.getScreenFrame(scr)
+    
+    -- Now safely use pre-computed layouts
+    if direction == "left" and WindowManagement.getLeftHalfLayout then
+      frame = WindowManagement.getLeftHalfLayout()
+      if frame then
+        win:setFrame(frame)
+        success = true
+      end
+    elseif direction == "right" and WindowManagement.getRightHalfLayout then
+      frame = WindowManagement.getRightHalfLayout()
+      if frame then
+        win:setFrame(frame)
+        success = true
+      end
+    elseif direction == "up" and WindowManagement.getTopHalfLayout then
+      frame = WindowManagement.getTopHalfLayout()
+      if frame then
+        win:setFrame(frame)
+        success = true
+      end
+    elseif direction == "down" and WindowManagement.getBottomHalfLayout then
+      frame = WindowManagement.getBottomHalfLayout()
+      if frame then
+        win:setFrame(frame)
+        success = true
+      end
+    elseif direction == "center" and WindowManagement.getCenterLayout then
+      frame = WindowManagement.getCenterLayout()
+      if frame then
+        win:setFrame(frame)
+        success = true
+      end
+    elseif direction == "max" and WindowManagement.getMaxLayout then
+      frame = WindowManagement.getMaxLayout()
+      if frame then
+        win:setFrame(frame)
+        success = true
+      end
+    end
   end
-
-  -- Apply window layout with cached layout table
-  local layout = WindowManagement.layout -- Cache layout table locally
-  local success = layout[direction](frame, win)
+  
+  -- Fall back to normal frame calculation and layout function if needed
+  if not success then
+    frame = WindowManagement.getScreenFrame(scr)
+    local layout = WindowManagement.layout -- Cache layout table locally
+    success = layout[direction](frame, win)
+  end
 
   -- Remember for ultra-fast path
   lastWindow = win
@@ -793,28 +830,28 @@ function WindowManagement.moveCenter() WindowManagement.moveWindow("center") end
 ------------------------------
 local AppManagement = {}
 
--- Fast direct lookup table (no metatable overhead)
--- Used for most frequent app lookups
-AppManagement.fastCache = {}
-
 -- App cache with intelligent loading, weak references, and predictive preloading
 AppManagement.appCache = setmetatable({}, {
   __mode = "kv", -- Both keys and values are weak references
   __index = function(self, key)
     if not key or key == "" then return nil end
 
-    -- First check ultra-fast direct lookup cache
-    local fastResult = AppManagement.fastCache[key]
-    if fastResult ~= nil then
+    -- Check if we have a cached entry
+    local cachedEntry = rawget(self, key)
+    if cachedEntry then
       if Utils.debugEnabled then
         Utils.metrics.cacheHits = Utils.metrics.cacheHits + 1
       end
-      return fastResult
+      return cachedEntry
     end
 
     -- Record access frequency for predictive loading
     AppManagement.frequencyCounter = AppManagement.frequencyCounter or {}
-    AppManagement.frequencyCounter[key] = (AppManagement.frequencyCounter[key] or 0) + 1
+    local newCount = (AppManagement.frequencyCounter[key] or 0) + 1
+    AppManagement.frequencyCounter[key] = newCount
+    
+    -- Update top apps list incrementally
+    AppManagement.updateTopAppsList(key, newCount)
 
     local app = nil
     -- Determine lookup strategy based on key format
@@ -830,29 +867,31 @@ AppManagement.appCache = setmetatable({}, {
     -- If found and running, cache it under all relevant keys
     if app and app:isRunning() then
       local name, bundleID = app:name(), app:bundleID()
+      
+      local cacheEntry = {
+        app = app,
+        validated = hsTimer.absoluteTime()
+      }
 
-      -- Update both caches - regular weak cache and fast direct lookup
+      -- Cache under all relevant keys
       if name then
-        self[name] = app
-        AppManagement.fastCache[name] = app
+        self[name] = cacheEntry
       end
 
       if bundleID then
-        self[bundleID] = app
-        AppManagement.fastCache[bundleID] = app
+        self[bundleID] = cacheEntry
       end
 
       -- Also cache under the original key if it wasn't the name or bundleID
       if key ~= name and key ~= bundleID then
-         self[key] = app
-         AppManagement.fastCache[key] = app
+         self[key] = cacheEntry
       end
 
       if Utils.debugEnabled then
         Utils.log("debug", strFmt("Cache miss for '%s', found '%s' (%s), now cached", key, name or "N/A", bundleID or "N/A"))
         Utils.metrics.cacheMisses = Utils.metrics.cacheMisses + 1
       end
-      return app
+      return cacheEntry
     end
 
     -- App not found or not running
@@ -864,22 +903,80 @@ AppManagement.appCache = setmetatable({}, {
   end
 })
 
--- Track most frequently used apps and preload them
-function AppManagement.predictivePreload()
-  if not AppManagement.frequencyCounter then return end
+-- Maintain sorted top apps list for efficient preloading
+AppManagement.topAppsList = {}
+AppManagement.topAppsSet = {} -- For O(1) membership checks
 
-  -- Find top apps by usage frequency
-  local topApps = {}
-  for app, count in pairs(AppManagement.frequencyCounter) do
-    tblInsert(topApps, {app = app, count = count})
+-- Cache of apps that respond well to instant activation (skip window operations)
+AppManagement.instantFocusApps = {
+  -- Common apps that work well with activate(true) only
+  ["com.apple.Safari"] = true,
+  ["com.microsoft.VSCode"] = true,
+  ["com.apple.Terminal"] = true,
+  ["com.googlecode.iterm2"] = true,
+  ["com.apple.finder"] = true,
+  ["com.apple.mail"] = true,
+  ["com.apple.MobileSMS"] = true,
+  ["com.spotify.client"] = true,
+  ["com.google.Chrome"] = true,
+  ["com.apple.Notes"] = true,
+  ["com.apple.TextEdit"] = true,
+  ["com.apple.ActivityMonitor"] = true,
+  ["com.apple.SystemPreferences"] = false, -- These need window operations
+  ["com.apple.Preferences"] = false,
+}
+
+-- Update the top apps list when frequency changes (global function)
+function AppManagement.updateTopAppsList(appKey, newCount)
+  local topApps = AppManagement.topAppsList
+  local topSet = AppManagement.topAppsSet
+  local maxTopApps = 10 -- Keep more in list than we preload for efficiency
+  
+  -- Remove app from current position if it exists
+  if topSet[appKey] then
+    for i = 1, #topApps do
+      if topApps[i].app == appKey then
+        table.remove(topApps, i)
+        break
+      end
+    end
   end
+  
+  -- Insert app in correct position based on count
+  local inserted = false
+  for i = 1, #topApps do
+    if newCount > topApps[i].count then
+      tblInsert(topApps, i, {app = appKey, count = newCount})
+      inserted = true
+      break
+    end
+  end
+  
+  -- If not inserted and list isn't full, add to end
+  if not inserted and #topApps < maxTopApps then
+    tblInsert(topApps, {app = appKey, count = newCount})
+  end
+  
+  -- Trim list to max size
+  if #topApps > maxTopApps then
+    topApps[maxTopApps + 1] = nil
+  end
+  
+  -- Update membership set
+  topSet = {}
+  for i = 1, #topApps do
+    topSet[topApps[i].app] = true
+  end
+  AppManagement.topAppsSet = topSet
+end
 
-  -- Sort by frequency (descending)
-  table.sort(topApps, function(a, b) return a.count > b.count end)
+-- Track most frequently used apps and preload them (optimized version)
+function AppManagement.predictivePreload()
+  if not AppManagement.topAppsList then return end
 
-  -- Preload the top N apps (limit to 5 for performance)
-  for i = 1, math.min(5, #topApps) do
-    local appKey = topApps[i].app
+  -- Preload the top 5 apps from our maintained list
+  for i = 1, math.min(5, #AppManagement.topAppsList) do
+    local appKey = AppManagement.topAppsList[i].app
     -- Only preload if not already in cache
     if not AppManagement.appCache[appKey] then
       -- Check if app is running before attempting to cache
@@ -892,8 +989,13 @@ function AppManagement.predictivePreload()
 
       if app and app:isRunning() then
         local name, bundleID = app:name(), app:bundleID()
-        if name then AppManagement.appCache[name] = app end
-        if bundleID then AppManagement.appCache[bundleID] = app end
+        local cacheEntry = {
+          app = app,
+          validated = hsTimer.absoluteTime()
+        }
+      
+        if name then AppManagement.appCache[name] = cacheEntry end
+        if bundleID then AppManagement.appCache[bundleID] = cacheEntry end
 
         if Utils.debugEnabled then
           Utils.log("debug", strFmt("Predictively preloaded '%s' (%s)", name or "N/A", bundleID or "N/A"))
@@ -903,23 +1005,84 @@ function AppManagement.predictivePreload()
   end
 end
 
+-- Pre-warm frequently used app windows to keep them responsive
+AppManagement.prewarmCounter = 0
+function AppManagement.prewarmAppWindows()
+  if not AppManagement.topAppsList then return end
+  
+  -- Only pre-warm every 3rd call (every ~4.5 minutes) to avoid overhead
+  AppManagement.prewarmCounter = AppManagement.prewarmCounter + 1
+  if AppManagement.prewarmCounter % 3 ~= 0 then return end
+  
+  local prewarmedCount = 0
+  
+  -- Pre-warm all instant focus cache apps first (highest priority)
+  for bundleID, isInstant in pairs(AppManagement.instantFocusApps) do
+    if isInstant == true and prewarmedCount < 5 then
+      local cachedEntry = AppManagement.appCache[bundleID]
+      if cachedEntry and cachedEntry.app then
+        local app = cachedEntry.app
+        local ok, isValid = pcall(function() return app:isValid() and app:isRunning() end)
+        if ok and isValid then
+          pcall(function()
+            -- Light pre-warming for instant focus apps
+            app:name() -- Keep app object active
+            local win = app:mainWindow()
+            if win then
+              win:frame() -- Touch window to keep it warm
+            end
+          end)
+          prewarmedCount = prewarmedCount + 1
+        end
+      end
+    end
+  end
+  
+  -- Pre-warm top frequency apps if we have room
+  for i = 1, math.min(3, #AppManagement.topAppsList) do
+    if prewarmedCount >= 5 then break end
+    
+    local appKey = AppManagement.topAppsList[i].app
+    local cachedEntry = AppManagement.appCache[appKey]
+    
+    if cachedEntry and cachedEntry.app then
+      local app = cachedEntry.app
+      local bundleID = app:bundleID()
+      
+      -- Skip if already pre-warmed via instant focus cache
+      if not (bundleID and AppManagement.instantFocusApps[bundleID] == true) then
+        local ok, isValid = pcall(function() return app:isValid() and app:isRunning() end)
+        if ok and isValid then
+          pcall(function()
+            local win = app:mainWindow()
+            if win then
+              win:frame() -- Touch window to keep it responsive
+            end
+          end)
+          prewarmedCount = prewarmedCount + 1
+        end
+      end
+    end
+  end
+  
+  if Utils.debugEnabled then
+    Utils.log("debug", strFmt("Pre-warmed %d app windows for responsiveness", prewarmedCount))
+  end
+end
+
 function AppManagement.buildRegistry()
   local cache = AppManagement.appCache -- Local cache for performance
-  local fastCache = AppManagement.fastCache or {} -- Fast direct cache
 
   -- Save top apps for frequency preservation
   local topAppObjects = {}
-  if fastCache then
-    for key, app in pairs(fastCache) do
-      if app:isValid() and app:isRunning() then
-        topAppObjects[key] = app
-      end
+  for key, entry in pairs(cache) do
+    if entry and entry.app and entry.app:isValid() and entry.app:isRunning() then
+      topAppObjects[key] = entry.app
     end
   end
 
   -- Clear existing caches
   for k in pairs(cache) do cache[k] = nil end
-  AppManagement.fastCache = {}
 
   -- Reset frequency counter but preserve the top N apps
   local topApps = {}
@@ -931,18 +1094,43 @@ function AppManagement.buildRegistry()
   end
 
   AppManagement.frequencyCounter = {}
+  
+  -- Clear and reset top apps list  
+  AppManagement.topAppsList = {}
+  AppManagement.topAppsSet = {}
+  
+  -- Limit cache size to prevent memory bloat over time
+  local cacheCount = 0
+  for _ in pairs(cache) do cacheCount = cacheCount + 1 end
+  if cacheCount > 100 then -- Clear excess entries beyond 100 apps
+    local keysToRemove = {}
+    local count = 0
+    for key in pairs(cache) do
+      count = count + 1
+      if count > 80 then -- Keep top 80, remove rest
+        table.insert(keysToRemove, key)
+      end
+    end
+    for _, key in ipairs(keysToRemove) do
+      cache[key] = nil
+    end
+  end
 
   -- Preserve frequency data for top 10 apps with reduced counts
   for i = 1, math.min(10, #topApps) do
     -- Reset to lower count but preserve ranking
-    AppManagement.frequencyCounter[topApps[i].app] = 11 - i
+    local newCount = 11 - i
+    AppManagement.frequencyCounter[topApps[i].app] = newCount
+    AppManagement.updateTopAppsList(topApps[i].app, newCount)
   end
 
   -- Restore saved top apps first (fastest path)
   for key, app in pairs(topAppObjects or {}) do
     if app:isValid() and app:isRunning() then
-      cache[key] = app
-      AppManagement.fastCache[key] = app
+      cache[key] = {
+        app = app,
+        validated = hsTimer.absoluteTime()
+      }
     end
   end
 
@@ -951,12 +1139,16 @@ function AppManagement.buildRegistry()
   for _, appObj in ipairs(allRunning) do
     local name, bundleID = appObj and appObj:name(), appObj and appObj:bundleID()
     if name then
-      cache[name] = appObj
-      AppManagement.fastCache[name] = appObj
+      cache[name] = {
+        app = appObj,
+        validated = hsTimer.absoluteTime()
+      }
     end
     if bundleID then
-      cache[bundleID] = appObj
-      AppManagement.fastCache[bundleID] = appObj
+      cache[bundleID] = {
+        app = appObj,
+        validated = hsTimer.absoluteTime()
+      }
     end
   end
 
@@ -1009,37 +1201,100 @@ end
 function AppManagement.focusApp(app)
   if not app then return false end
 
-  -- Use direct activation with timeout protection
-  local activationSuccess = false
-
-  -- First try to get main window before activation (fastest common case)
-  local win = app:mainWindow()
-
-  -- If we have a valid window, focus it directly
-  if win then
-    win:focus()
-    activationSuccess = true
-  else
-    -- Otherwise, activate the app
-    activationSuccess = app:activate()
-  end
-
-  -- Try again to get window after activation
-  if not win then
-    win = app:mainWindow()
-    if not win then
-      local allWindows = app:allWindows()
-      if #allWindows > 0 then
-        win = allWindows[1]
-      end
+  local focusStartTime = hsTimer.secondsSinceEpoch()
+  
+  -- Check if this app is in our instant focus cache
+  local bundleID = app:bundleID()
+  if bundleID and AppManagement.instantFocusApps[bundleID] == true then
+    -- Ultra-fast path: just activate without any window operations
+    Utils.metrics.instantFocusHits = Utils.metrics.instantFocusHits + 1
+    if Utils.debugEnabled and Config.debug.performanceProfiling then
+      Utils.log("debug", strFmt("INSTANT FOCUS: '%s'", bundleID))
     end
+    local result = app:activate(true)
+    if Utils.debugEnabled and Config.debug.performanceProfiling then
+      local duration = (hsTimer.secondsSinceEpoch() - focusStartTime) * 1000
+      Utils.log("debug", strFmt("INSTANT FOCUS DONE: %.3fms", duration))
+    end
+    return result
+  elseif bundleID and AppManagement.instantFocusApps[bundleID] == false then
+    Utils.metrics.instantFocusMisses = Utils.metrics.instantFocusMisses + 1
+    -- Apps that need window operations - use slower but more reliable method
+    local win = app:mainWindow()
+    if win then
+      win:focus()
+      return true
+    else
+      local activationSuccess = app:activate(true)
+      -- Try to get window after activation
+      win = app:mainWindow()
+      if not win then
+        local allWindows = app:allWindows()
+        if #allWindows > 0 then
+          win = allWindows[1]
+        end
+      end
+      if win then
+        win:focus()
+      end
+      return activationSuccess
+    end
+  else
+    -- Unknown app - use original logic and learn from it
+    Utils.metrics.instantFocusMisses = Utils.metrics.instantFocusMisses + 1
+    if Utils.debugEnabled and Config.debug.performanceProfiling then
+      Utils.log("debug", strFmt("WINDOW FOCUS: '%s' (unknown app)", bundleID or "no-bundle"))
+    end
+    
+    local windowStartTime = hsTimer.secondsSinceEpoch()
+    local activationSuccess = false
+    local win = app:mainWindow()
 
     if win then
       win:focus()
+      activationSuccess = true
+      if Utils.debugEnabled and Config.debug.performanceProfiling then
+        Utils.log("debug", strFmt("MAIN WINDOW: found and focused"))
+      end
+    else
+      local activateStartTime = hsTimer.secondsSinceEpoch()
+      activationSuccess = app:activate(true)
+      if Utils.debugEnabled and Config.debug.performanceProfiling then
+        local activateDuration = (hsTimer.secondsSinceEpoch() - activateStartTime) * 1000
+        Utils.log("debug", strFmt("APP ACTIVATE: %.3fms", activateDuration))
+      end
+      
+      -- Try again to get window after activation
+      if not win then
+        local windowSearchStart = hsTimer.secondsSinceEpoch()
+        win = app:mainWindow()
+        if not win then
+          local allWindows = app:allWindows()
+          if #allWindows > 0 then
+            win = allWindows[1]
+          end
+        end
+        if win then
+          win:focus()
+        end
+        if Utils.debugEnabled and Config.debug.performanceProfiling then
+          local searchDuration = (hsTimer.secondsSinceEpoch() - windowSearchStart) * 1000
+          Utils.log("debug", strFmt("WINDOW SEARCH: %.3fms", searchDuration))
+        end
+      end
     end
-  end
 
-  return activationSuccess
+    -- Learn: if activation worked quickly, mark as instant-focus-friendly
+    local totalFocusTime = (hsTimer.secondsSinceEpoch() - windowStartTime) * 1000
+    if activationSuccess and bundleID and totalFocusTime < 100 then -- Less than 100ms = fast
+      AppManagement.instantFocusApps[bundleID] = true
+      if Utils.debugEnabled then
+        Utils.log("debug", strFmt("LEARNED: '%s' works well with instant focus (%.1fms)", bundleID, totalFocusTime))
+      end
+    end
+
+    return activationSuccess
+  end
 end
 
 -- Add a function to preload Messages app specifically
@@ -1131,10 +1386,21 @@ function AppManagement.observeAppLaunch(appKey, callback, timeout)
   -- @param appKey string The bundle ID, name, or path of the application.
   -- @param options table|nil Optional table. Can contain { timeout = number } for launch observation.
   function AppManagement.switchToApp(appKey, options)
+    local overallStartTime = hsTimer.secondsSinceEpoch()
+    
     options = options or {} -- Ensure options table exists
     if not appKey or appKey == "" then
       if Utils.debugEnabled then Utils.log("error", "Invalid app key provided to switchToApp") end
       return false
+    end
+
+    -- Track time since last app switch
+    local timeSinceLastSwitch = Utils.metrics.appSwitches.lastTime > 0 
+      and (overallStartTime - Utils.metrics.appSwitches.lastTime) * 1000 or 0
+    Utils.metrics.appSwitches.lastTime = overallStartTime
+    
+    if Utils.debugEnabled and Config.debug.performanceProfiling then
+      Utils.log("debug", strFmt("=== APP SWITCH START: '%s' (%.1fms since last) ===", appKey, timeSinceLastSwitch))
     end
 
   local startTime
@@ -1142,85 +1408,111 @@ function AppManagement.observeAppLaunch(appKey, callback, timeout)
     startTime = hsTimer.secondsSinceEpoch()
   end
 
-  -- Fast-path access for most frequent apps
-  -- Direct table access with no metatable or function call overhead
-  local app = AppManagement.fastCache and AppManagement.fastCache[appKey]
-
-  -- Skip validity check for apps we just verified (massive performance win)
-  local lastAppKey = AppManagement._lastVerifiedApp and AppManagement._lastVerifiedApp.key
-  local lastAppTimestamp = AppManagement._lastVerifiedApp and AppManagement._lastVerifiedApp.time
-  local currentTime = hsTimer.absoluteTime()
-  local FAST_VERIFY_WINDOW = 1000000000 -- 1 second in nanoseconds
-
-  -- Ultra-fast path - app verified within last second
-  if app and lastAppKey == appKey and lastAppTimestamp and
-     (currentTime - lastAppTimestamp) < FAST_VERIFY_WINDOW then
-
-    if Utils.debugEnabled then
+  -- Simplified single-level cache access with defensive programming
+  local cacheStartTime = hsTimer.secondsSinceEpoch()
+  local cachedEntry = AppManagement.appCache[appKey]
+  local app = nil
+  local lastValidated = nil
+  
+  -- Handle both cache entry structures and direct app objects
+  if cachedEntry then
+    if type(cachedEntry) == "table" and cachedEntry.app then
+      -- New cache entry structure
+      app = cachedEntry.app
+      lastValidated = cachedEntry.validated
       Utils.metrics.cacheHits = Utils.metrics.cacheHits + 1
-      Utils.log("debug", strFmt("Ultra-fast verification for '%s'", appKey))
-    end
-
-    -- Track for frequency-based optimization
-    if AppManagement.frequencyCounter then
-      AppManagement.frequencyCounter[appKey] = (AppManagement.frequencyCounter[appKey] or 0) + 2 -- Extra weight
-    end
-
-    -- Skip validation check completely - we just verified this
-    goto focus_app
-  end
-
-  -- If not in fast cache, check regular cache
-  if not app then
-    app = AppManagement.appCache[appKey]
-
-    -- If found in regular cache, promote to fast cache for next time
-    if app then
-      if not AppManagement.fastCache then AppManagement.fastCache = {} end
-      AppManagement.fastCache[appKey] = app
-    end
-  end
-
-  -- Check if the cached app object is still valid (app might have been terminated)
-  if app then
-    -- Debugging: Inspect the cached object before checking validity
-    if Utils.debugEnabled then
-      print(strFmt("switchToApp: Cache hit for '%s'. Type: %s", appKey, type(app)))
-      -- Use pcall for inspect in case the object is truly strange
-      pcall(function() hs.inspect(app) end)
-    end
-
-    local ok, valid = pcall(function() return app:isValid() end)
-    if not ok or not valid then
-      if Utils.debugEnabled then
-        -- Log the error from pcall if it failed, or just that it's invalid
-        local reason = not ok and tostring(valid) or "isValid returned false"
-        Utils.log("debug", strFmt("switchToApp: Found stale/invalid app '%s' in cache (%s), forcing relaunch.", appKey, reason))
+      if Utils.debugEnabled and Config.debug.performanceProfiling then
+        Utils.log("debug", strFmt("CACHE HIT: '%s' (%.3fms)", appKey, (hsTimer.secondsSinceEpoch() - cacheStartTime) * 1000))
       end
-      app = nil -- Treat as cache miss
-      AppManagement.appCache[appKey] = nil -- Explicitly clear stale entry
-      AppManagement.fastCache[appKey] = nil -- Clear from fast cache too
+    elseif type(cachedEntry) == "userdata" then
+      -- Legacy direct app object - convert to new structure
+      app = cachedEntry
+      lastValidated = nil -- Force validation since we don't have timestamp
+      AppManagement.appCache[appKey] = {
+        app = app,
+        validated = hsTimer.absoluteTime()
+      }
+      Utils.metrics.cacheHits = Utils.metrics.cacheHits + 1
+      if Utils.debugEnabled and Config.debug.performanceProfiling then
+        Utils.log("debug", strFmt("CACHE HIT (LEGACY): '%s' (%.3fms)", appKey, (hsTimer.secondsSinceEpoch() - cacheStartTime) * 1000))
+      end
     else
-      -- Add to recently verified list for ultra-fast path
-      if not AppManagement._lastVerifiedApp then
-        AppManagement._lastVerifiedApp = {}
+      -- Unknown cache entry type, clean it up
+      AppManagement.appCache[appKey] = nil
+      Utils.metrics.cacheCorruptions = Utils.metrics.cacheCorruptions + 1
+      if Utils.debugEnabled then
+        Utils.log("debug", strFmt("CORRUPTION: Cleaned up unknown cache entry type for '%s' (type: %s)", appKey, type(cachedEntry)))
       end
-      AppManagement._lastVerifiedApp.key = appKey
-      AppManagement._lastVerifiedApp.time = hsTimer.absoluteTime()
+    end
+  else
+    Utils.metrics.cacheMisses = Utils.metrics.cacheMisses + 1
+    if Utils.debugEnabled and Config.debug.performanceProfiling then
+      Utils.log("debug", strFmt("CACHE MISS: '%s'", appKey))
     end
   end
 
-  ::focus_app:: -- Target for skipping verification
+  -- Debounce rapid app switching to prevent cache thrashing
+  local currentTime = hsTimer.absoluteTime()
+  if (currentTime - lastAppSwitchTime) < APP_SWITCH_DEBOUNCE_NS then
+    -- Allow instant focus cache apps to bypass debouncing
+    local bundleID = app and app:bundleID()
+    if not (bundleID and AppManagement.instantFocusApps[bundleID] == true) then
+      Utils.metrics.debounceSkips = Utils.metrics.debounceSkips + 1
+      if Utils.debugEnabled and Config.debug.performanceProfiling then
+        local debounceTime = (currentTime - lastAppSwitchTime) / 1000000
+        Utils.log("debug", strFmt("DEBOUNCED: '%s' (%.1fms ago, skipping)", appKey, debounceTime))
+      end
+      return false -- Skip rapid switches for non-instant apps
+    end
+  end
+  lastAppSwitchTime = currentTime
+  local VALIDATION_INTERVAL = 15000000000 -- 15 seconds in nanoseconds (reduced frequency)
+
+  -- Check validity only if we haven't validated recently and app exists
+  if app and type(app) == "userdata" and (not lastValidated or (currentTime - lastValidated) > VALIDATION_INTERVAL) then
+    local validationStartTime = hsTimer.secondsSinceEpoch()
+    Utils.metrics.validationCalls = Utils.metrics.validationCalls + 1
+    
+    -- Use pcall to safely check validity
+    local ok, isValid = pcall(function() return app:isValid() end)
+    local validationDuration = (hsTimer.secondsSinceEpoch() - validationStartTime) * 1000
+    Utils.metrics.validationTime = Utils.metrics.validationTime + validationDuration
+    
+    if ok and isValid then
+      -- Update validation timestamp
+      AppManagement.appCache[appKey].validated = currentTime
+      if Utils.debugEnabled and Config.debug.performanceProfiling then
+        Utils.log("debug", strFmt("VALIDATION: '%s' OK (%.3fms)", appKey, validationDuration))
+      end
+    else
+      -- Clear invalid app from cache
+      AppManagement.appCache[appKey] = nil
+      app = nil
+      if Utils.debugEnabled then
+        local reason = not ok and "error during validation" or "app no longer valid"
+        Utils.log("debug", strFmt("VALIDATION: '%s' FAILED - %s (%.3fms)", appKey, reason, validationDuration))
+      end
+    end
+  end
 
   -- If found in cache (and now confirmed valid), focus synchronously
   if app then
+    local focusStartTime = hsTimer.secondsSinceEpoch()
     local focusSuccess = AppManagement.focusApp(app)
+    local focusEndTime = hsTimer.secondsSinceEpoch()
+    local overallEndTime = hsTimer.secondsSinceEpoch()
+    
     if Utils.debugEnabled then
-      local endTime = hsTimer.secondsSinceEpoch()
       Utils.metrics.appSwitches.count = Utils.metrics.appSwitches.count + 1
-      Utils.metrics.appSwitches.totalTime = Utils.metrics.appSwitches.totalTime + (endTime - startTime)
-      if focusSuccess then
-        Utils.log("debug", strFmt("Successfully switched to cached app '%s' in %.3f seconds", appKey, endTime - startTime))
+      local totalTime = overallEndTime - startTime
+      local focusTime = focusEndTime - focusStartTime
+      Utils.metrics.appSwitches.totalTime = Utils.metrics.appSwitches.totalTime + totalTime
+      
+      if Config.debug.performanceProfiling then
+        Utils.log("debug", strFmt("FOCUS: %.3fms, TOTAL: %.3fms", focusTime * 1000, totalTime * 1000))
+        Utils.log("debug", strFmt("=== APP SWITCH END: '%s' %s ===", appKey, focusSuccess and "SUCCESS" or "FAILED"))
+      elseif focusSuccess then
+        Utils.log("debug", strFmt("Successfully switched to cached app '%s' in %.3f seconds", appKey, totalTime))
       else
         Utils.log("warning", strFmt("Found cached app '%s' but failed to focus it.", appKey))
       end
@@ -1275,26 +1567,28 @@ end
 
 -- This watcher updates our registry when apps launch/terminate
 function AppManagement.watcherCallback(appName, eventType, appObj)
-  -- Ensure fast cache exists
-  if not AppManagement.fastCache then AppManagement.fastCache = {} end
-
   if eventType == hsWatcher.launched then
-    -- App launched, add to both caches if not already there
+    -- App launched, add to cache if not already there
     if appObj then
       local name, bundleID = appObj:name(), appObj:bundleID()
+      local cacheEntry = {
+        app = appObj,
+        validated = hsTimer.absoluteTime()
+      }
       if name then
-        AppManagement.appCache[name] = appObj
-        AppManagement.fastCache[name] = appObj
+        AppManagement.appCache[name] = cacheEntry
       end
       if bundleID then
-        AppManagement.appCache[bundleID] = appObj
-        AppManagement.fastCache[bundleID] = appObj
+        AppManagement.appCache[bundleID] = cacheEntry
       end
 
       -- Record new app in frequency counter for future preloading
       if AppManagement.frequencyCounter then
         local key = bundleID or name
-        if key then AppManagement.frequencyCounter[key] = 1 end
+        if key then 
+          AppManagement.frequencyCounter[key] = 1
+          AppManagement.updateTopAppsList(key, 1)
+        end
       end
     end
   elseif eventType == hsWatcher.terminated then
@@ -1303,15 +1597,12 @@ function AppManagement.watcherCallback(appName, eventType, appObj)
       local name, bundleID = appObj:name(), appObj:bundleID()
       if name then
         AppManagement.appCache[name] = nil
-        AppManagement.fastCache[name] = nil
       end
       if bundleID then
         AppManagement.appCache[bundleID] = nil
-        AppManagement.fastCache[bundleID] = nil
       end
     end
     AppManagement.appCache[appName] = nil
-    AppManagement.fastCache[appName] = nil
   end
 end
 
@@ -1400,6 +1691,10 @@ function Init.start()
   end
   AppManagement.watcher:start()
 
+  -- Start screen watcher for cache invalidation
+  screenWatcher = hsScreenWatcher.new(invalidateScreenCaches)
+  screenWatcher:start()
+
   -- Bind all hotkeys
   Init.bindWindowHotkeys()
   Init.bindAppHotkeys()
@@ -1417,6 +1712,7 @@ hs.shutdownCallback = function()
   end
 
   AppManagement.watcher:stop()
+  if screenWatcher then screenWatcher:stop() end
   if FFI.shutdown then FFI.shutdown() end
   collectG("collect")
 end
@@ -1435,6 +1731,11 @@ function ApplyPerformanceOptimizations()
         AppManagement.predictivePreload()
       end
       
+      -- Pre-warm frequently used app windows
+      if AppManagement.prewarmAppWindows then
+        AppManagement.prewarmAppWindows()
+      end
+      
       -- Optional light memory cleanup (much less frequent)
       if Utils.debugEnabled then
         local before = collectG("count")
@@ -1445,18 +1746,33 @@ function ApplyPerformanceOptimizations()
     end)
   end)
 
-  -- Flush JIT cache and optimize after initialization
-  if package.preload.jit then
-    local jit = require("jit")
-    jit.opt.start("hotloop=10", "hotexit=2")
-    jit.flush()
+  -- Let LuaJIT optimize naturally without forced parameters
+  -- Note: Removed aggressive JIT settings that were counterproductive
+  -- Reasoning:
+  --   - jit.flush() destroys the JIT cache we want to build up
+  --   - Forced hotloop/hotexit parameters interfere with adaptive optimization
+  --   - LuaJIT's built-in heuristics are well-tuned for most workloads
+  
+  -- Use conservative GC tuning - more responsive but not aggressive
+  -- These settings balance memory usage with UI responsiveness
+  if collectG then
+    collectG("setpause", 100)   -- Default is 200, this runs GC more frequently
+    collectG("setstepmul", 120) -- Default is 200, this uses smaller GC steps
+    -- Result: More frequent but smaller GC pauses = smoother performance
   end
 
-  -- Optimize garbage collector for UI responsiveness
-  if collectG then
-    collectG("setpause", 140)
-    collectG("setstepmul", 200)
-  end
+  -- Disable macOS animations for instant app switching
+  pcall(function()
+    hs.execute("defaults write NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false")
+    hs.execute("defaults write NSGlobalDomain NSWindowResizeTime -float 0.001")
+    hs.execute("defaults write com.apple.dock expose-animation-duration -float 0.1")
+    hs.execute("defaults write com.apple.dock autohide-time-modifier -float 0")
+    hs.execute("defaults write com.apple.dock autohide-delay -float 0")
+    
+    if Utils.debugEnabled then
+      Utils.log("info", "Disabled macOS animations for faster app switching")
+    end
+  end)
 
 
 
