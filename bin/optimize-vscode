@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# VSCode Performance Optimization Script
+set -euo pipefail
+
+# Colors
+info() { echo -e "\033[0;34mℹ\033[0m $1"; }
+ok() { echo -e "\033[0;32m✓\033[0m $1"; }
+warn() { echo -e "\033[1;33m⚠\033[0m $1"; }
+error() { echo -e "\033[0;31m✗\033[0m $1" >&2; }
+
+echo "🔧 VSCode Performance Optimization"
+echo ""
+
+# Check if VSCode is installed
+if ! command -v code &>/dev/null; then
+    error "VSCode 'code' command not found. Install it via: Cmd+Shift+P → 'Shell Command: Install code command'"
+    exit 1
+fi
+
+# Count current extensions
+CURRENT_COUNT=$(code --list-extensions | wc -l)
+info "Current extension count: $CURRENT_COUNT"
+echo ""
+
+# === CRITICAL PERFORMANCE FIXES ===
+
+info "Step 1: Removing performance-killing extensions..."
+
+# Import Cost - MAJOR performance impact
+if code --list-extensions | grep -q "wix.vscode-import-cost"; then
+    code --uninstall-extension wix.vscode-import-cost
+    ok "Removed Import Cost (eliminates typing lag)"
+else
+    info "Import Cost already removed"
+fi
+
+echo ""
+info "Step 2: Removing duplicate extensions..."
+
+# Docker duplicate
+if code --list-extensions | grep -q "ms-azuretools.vscode-docker"; then
+    code --uninstall-extension ms-azuretools.vscode-docker
+    ok "Removed duplicate Docker extension"
+fi
+
+# Svelte duplicate
+if code --list-extensions | grep -q "ardenivanov.svelte-intellisense"; then
+    code --uninstall-extension ardenivanov.svelte-intellisense
+    ok "Removed duplicate Svelte extension"
+fi
+
+echo ""
+info "Step 3: Removing low-value extensions..."
+
+# Low-value extensions
+for ext in bodil.file-browser jacobdufault.fuzzy-search aaron-bond.better-comments oderwat.indent-rainbow mikestead.dotenv; do
+    if code --list-extensions | grep -q "$ext"; then
+        code --uninstall-extension "$ext"
+        ok "Removed $ext"
+    fi
+done
+
+echo ""
+NEW_COUNT=$(code --list-extensions | wc -l)
+REMOVED=$((CURRENT_COUNT - NEW_COUNT))
+
+ok "Extensions optimized! Removed $REMOVED extensions"
+echo ""
+
+# === OPTIONAL REMOVALS ===
+
+echo "🤔 Optional: Remove extensions you might not use"
+echo ""
+
+# Check for expensive optional extensions
+if code --list-extensions | grep -q "wallabyjs.quokka-vscode"; then
+    warn "Quokka is installed (costs \$50-100/year, heavy extension)"
+    echo "  Remove with: code --uninstall-extension wallabyjs.quokka-vscode"
+fi
+
+if code --list-extensions | grep -q "ms-vsliveshare.vsliveshare"; then
+    warn "Live Share is installed (heavy, only needed for pair programming)"
+    echo "  Remove with: code --uninstall-extension ms-vsliveshare.vsliveshare"
+fi
+
+if code --list-extensions | grep -q "vspacecode.vspacecode"; then
+    warn "VSpaceCode is installed (adds keybinding overhead)"
+    echo "  Remove with: code --uninstall-extension vspacecode.vspacecode"
+    echo "              code --uninstall-extension vspacecode.whichkey"
+fi
+
+if code --list-extensions | grep -q "kahole.magit"; then
+    warn "Magit is installed (redundant with GitLens + terminal git)"
+    echo "  Remove with: code --uninstall-extension kahole.magit"
+fi
+
+echo ""
+
+# === SETTINGS RECOMMENDATIONS ===
+
+echo "📝 Next Steps:"
+echo ""
+echo "1. ✅ Extensions cleaned up ($REMOVED removed)"
+echo ""
+echo "2. ⚠️  Add these settings to improve performance:"
+echo ""
+echo "   Open: ~/Library/Application Support/Code/User/settings.json"
+echo ""
+echo "   Add:"
+echo '   {
+     // GitLens optimization
+     "gitlens.mode.statusBar.enabled": false,
+     "gitlens.hovers.enabled": false,
+     "gitlens.codeLens.enabled": false,
+     "gitlens.currentLine.enabled": false,
+
+     // Editor performance
+     "editor.renderWhitespace": "boundary",
+     "editor.cursorBlinking": "blink",
+     "editor.cursorSmoothCaretAnimation": "off",
+     "editor.fontLigatures": false,
+     "editor.bracketPairColorization.enabled": true,
+     "editor.guides.bracketPairs": false,
+
+     // Terminal
+     "terminal.integrated.gpuAcceleration": "on",
+
+     // Python lazy loading
+     "python.analysis.autoSearchPaths": false,
+     "python.analysis.indexing": false
+   }'
+echo ""
+echo "3. 🔄 Restart VSCode"
+echo ""
+echo "4. 📊 Measure improvement:"
+echo "   Cmd+Shift+P → 'Developer: Startup Performance'"
+echo ""
+
+echo "✨ Optimization complete!"
+echo ""
+echo "📖 Full audit report: ~/Projects/dotfiles/docs/vscode-performance-audit.md"

@@ -1,0 +1,126 @@
+#!/usr/bin/env zsh
+
+# Z4H Repair Script
+# Fixes corrupted or incomplete zsh4humans installations
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Helper functions
+info() { echo -e "${BLUE}ℹ${NC} $1"; }
+success() { echo -e "${GREEN}✓${NC} $1"; }
+warning() { echo -e "${YELLOW}⚠${NC} $1"; }
+error() { echo -e "${RED}✗${NC} $1"; }
+
+info "Z4H Repair Script"
+echo
+
+# Check if Z4H environment variables are set
+if [[ -z "$Z4H" ]]; then
+    export Z4H="${XDG_CACHE_HOME:-$HOME/.cache}/zsh4humans/v5"
+    warning "Z4H not set, using default: $Z4H"
+fi
+
+z4h_dir="$Z4H"
+required_files=(
+    "$z4h_dir/z4h.zsh"
+    "$z4h_dir/powerlevel10k/powerlevel10k.zsh-theme"
+    "$z4h_dir/zsh-autosuggestions/zsh-autosuggestions.zsh"
+    "$z4h_dir/zsh-history-substring-search/zsh-history-substring-search.zsh"
+    "$z4h_dir/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+)
+
+# Check current state
+info "Checking Z4H installation..."
+missing_files=()
+for file in "${required_files[@]}"; do
+    if [[ ! -f "$file" ]]; then
+        missing_files+=("$file")
+    fi
+done
+
+if [[ ${#missing_files[@]} -eq 0 ]]; then
+    success "Z4H installation is complete - no repair needed"
+    exit 0
+fi
+
+warning "Found ${#missing_files[@]} missing files:"
+for file in "${missing_files[@]}"; do
+    echo "  - $file"
+done
+echo
+
+info "Repairing Z4H installation..."
+
+# Remove incomplete installation
+if [[ -d "$z4h_dir" ]]; then
+    info "Removing incomplete installation..."
+    rm -rf "$z4h_dir"
+fi
+
+# Create directory structure
+info "Creating directory structure..."
+mkdir -p "$z4h_dir"
+
+# Download z4h core
+info "Downloading z4h core..."
+if ! curl -fsSL https://raw.githubusercontent.com/romkatv/zsh4humans/v5/z4h.zsh -o "$z4h_dir/z4h.zsh"; then
+    error "Failed to download z4h core"
+    exit 1
+fi
+
+# Download required plugins
+info "Downloading powerlevel10k..."
+if ! git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$z4h_dir/powerlevel10k" >/dev/null 2>&1; then
+    error "Failed to download powerlevel10k"
+    exit 1
+fi
+
+info "Downloading zsh-autosuggestions..."
+if ! git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions.git "$z4h_dir/zsh-autosuggestions" >/dev/null 2>&1; then
+    error "Failed to download zsh-autosuggestions"
+    exit 1
+fi
+
+info "Downloading zsh-history-substring-search..."
+if ! git clone --depth=1 https://github.com/zsh-users/zsh-history-substring-search.git "$z4h_dir/zsh-history-substring-search" >/dev/null 2>&1; then
+    error "Failed to download zsh-history-substring-search"
+    exit 1
+fi
+
+info "Downloading zsh-syntax-highlighting..."
+if ! git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git "$z4h_dir/zsh-syntax-highlighting" >/dev/null 2>&1; then
+    error "Failed to download zsh-syntax-highlighting"
+    exit 1
+fi
+
+# Create required directories
+info "Creating support directories..."
+mkdir -p "$z4h_dir"/{bin,cache,fn,terminfo,tmp,stickycache}
+
+# Verify repair
+info "Verifying repair..."
+verification_failed=false
+for file in "${required_files[@]}"; do
+    if [[ ! -f "$file" ]]; then
+        error "Still missing: $file"
+        verification_failed=true
+    fi
+done
+
+if [[ "$verification_failed" == true ]]; then
+    error "Repair verification failed"
+    exit 1
+fi
+
+success "Z4H repair completed successfully!"
+echo
+info "Next steps:"
+echo "1. Restart your terminal or run: exec zsh"
+echo "2. If problems persist, run: ~/Projects/dotfiles/install.sh"

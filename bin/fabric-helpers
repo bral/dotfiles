@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Fabric Pattern Helper Functions
+# Convenient shortcuts for common Fabric patterns
+
+# Generate a smart commit message from git diff
+smart-commit() {
+  if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository"
+    return 1
+  fi
+
+  local diff
+  diff=$(git diff --cached)
+
+  if [[ -z "$diff" ]]; then
+    echo "Error: No staged changes to commit"
+    echo "Use 'git add' to stage changes first"
+    return 1
+  fi
+
+  echo "$diff" | fabric --pattern smart_commit_message
+}
+
+# Document code from a file
+doc-code() {
+  if [[ -z "$1" ]]; then
+    echo "Usage: doc-code <file>"
+    echo "Example: doc-code script.sh"
+    return 1
+  fi
+
+  if [[ ! -f "$1" ]]; then
+    echo "Error: File not found: $1"
+    return 1
+  fi
+
+  cat "$1" | fabric --pattern document_code
+}
+
+# Extract TODOs from text
+get-todos() {
+  if [[ -p /dev/stdin ]]; then
+    # Read from pipe
+    fabric --pattern extract_todos
+  elif [[ -n "$1" ]]; then
+    # Read from file
+    if [[ ! -f "$1" ]]; then
+      echo "Error: File not found: $1"
+      return 1
+    fi
+    cat "$1" | fabric --pattern extract_todos
+  else
+    echo "Usage: get-todos <file> OR <command> | get-todos"
+    echo "Example: get-todos meeting-notes.txt"
+    echo "Example: cat notes.txt | get-todos"
+    return 1
+  fi
+}
+
+# Git commit with AI-generated message
+ai-commit() {
+  if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository"
+    return 1
+  fi
+
+  local staged_diff
+  staged_diff=$(git diff --cached)
+
+  if [[ -z "$staged_diff" ]]; then
+    echo "Error: No staged changes to commit"
+    echo "Use 'git add' to stage changes first"
+    return 1
+  fi
+
+  echo "Generating commit message..."
+  local message
+  message=$(echo "$staged_diff" | fabric --pattern smart_commit_message)
+
+  if [[ -z "$message" ]]; then
+    echo "Error: Failed to generate commit message"
+    return 1
+  fi
+
+  echo ""
+  echo "=== Generated Commit Message ==="
+  echo "$message"
+  echo "================================"
+  echo ""
+
+  # zsh-compatible read with prompt
+  echo -n "Commit with this message? [y/N] "
+  read -r REPLY
+
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    git commit -m "$message"
+    echo "✅ Committed successfully!"
+  else
+    echo "Commit cancelled"
+    return 1
+  fi
+}
+
+# Show available custom patterns
+list-custom-patterns() {
+  echo "Custom Fabric Patterns:"
+  echo ""
+  echo "1. smart_commit_message - Generate conventional commit messages"
+  echo "   Usage: git diff --cached | fabric --pattern smart_commit_message"
+  echo "   Alias: smart-commit"
+  echo ""
+  echo "2. document_code - Create README-style documentation for code"
+  echo "   Usage: cat script.sh | fabric --pattern document_code"
+  echo "   Alias: doc-code <file>"
+  echo ""
+  echo "3. extract_todos - Extract action items from text"
+  echo "   Usage: cat notes.txt | fabric --pattern extract_todos"
+  echo "   Alias: get-todos <file>"
+  echo ""
+  echo "Helper Functions:"
+  echo "  - ai-commit: Stage changes and commit with AI-generated message"
+  echo "  - smart-commit: Generate commit message without committing"
+  echo "  - doc-code <file>: Generate documentation for a code file"
+  echo "  - get-todos <file>: Extract todos from a file or stdin"
+}
+
+# Export functions so they're available in the shell
+export -f smart-commit doc-code get-todos ai-commit list-custom-patterns

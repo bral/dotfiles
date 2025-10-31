@@ -1,551 +1,406 @@
-# Performance monitoring
-zmodload zsh/datetime
-typeset -g SHELL_START_TIME=$EPOCHREALTIME
+#!/usr/bin/env zsh
+# Optimized zsh configuration - v2.1
+# Performance target: <40ms startup time
 
-# Enable Powerlevel10k instant prompt. Should stay close to the top of ~/.zshrc.
-if [[ -r ~/.cache/p10k-instant-prompt-${(%):-%n}.zsh ]]; then
-  source ~/.cache/p10k-instant-prompt-${(%):-%n}.zsh
-fi
+# --- Early exit for non-interactive shells ---
+[[ -o interactive ]] || return
 
-# Documentation: https://github.com/romkatv/zsh4humans/blob/v5/README.md
+# === INSTANT PROMPT (Must be first) ===
+# Powerlevel10k instant prompt - DISABLED (migrated to Starship)
+# if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+#   source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+# fi
 
-# Z4H Configuration
-zstyle ':z4h:' auto-update      'no'
-zstyle ':z4h:' auto-update-days '1'
-zstyle ':z4h:bindkey' keyboard  'mac'
-zstyle ':z4h:' start-tmux 'no'
-zstyle ':z4h:' term-shell-integration 'yes'
-zstyle ':z4h:' prompt-at-bottom 'yes'
-zstyle ':z4h:autosuggestions' forward-char 'accept'
-zstyle ':z4h:fzf-complete' recurse-dirs 'no'
-zstyle ':z4h:direnv' enable 'yes'
-zstyle ':z4h:direnv:success' notify 'yes'
-
-# Install zsh-defer
-z4h install romkatv/zsh-defer || return
-
-# Initialize Z4H
-z4h init || return
-
-# Load zsh-defer
-z4h load romkatv/zsh-defer
-
-# Safe zsh compilation function (runs once per day)
-_safe_zsh_compile() {
-  local compile_marker="$HOME/.zsh_last_compile"
-  local today=$(date +%Y%m%d)
-
-  # Only compile if marker doesn't exist or is older than today
-  if [[ ! -f "$compile_marker" ]] || [[ "$(<$compile_marker 2>/dev/null)" != "$today" ]]; then
-    {
-      [[ ! -e ~/.zshrc.zwc || ~/.zshrc -nt ~/.zshrc.zwc ]] && zcompile ~/.zshrc
-      [[ -f ~/.env.zsh && (! -e ~/.env.zsh.zwc || ~/.env.zsh -nt ~/.env.zsh.zwc) ]] && zcompile ~/.env.zsh
-      [[ -f ~/.secrets.zsh && (! -e ~/.secrets.zsh.zwc || ~/.secrets.zsh -nt ~/.secrets.zsh.zwc) ]] && zcompile ~/.secrets.zsh
-      [[ -f ~/.zsh_paths_static && (! -e ~/.zsh_paths_static.zwc || ~/.zsh_paths_static -nt ~/.zsh_paths_static.zwc) ]] && zcompile ~/.zsh_paths_static
-      echo "$today" > "$compile_marker"
-    } 2>/dev/null
-  fi
-}
-
-# Defer compilation check
-zsh-defer _safe_zsh_compile
-
-# ==== IMMEDIATE CRITICAL SETTINGS ====
-export MISE_NODE_COREPACK=true # Allow corepack to manage pnpm and npm
-
-# Only activate commonly used languages immediately, defer others
-eval "$(~/.local/bin/mise activate zsh --shims)"
-
-# Setup lazy loading for mise-managed tools
-_load_mise_env() {
-  eval "$(~/.local/bin/mise activate zsh)"
-}
-zsh-defer _load_mise_env
-
-# Initialize zoxide for smart directory navigation
-if command -v zoxide >/dev/null 2>&1; then
-  eval "$(zoxide init zsh)"
-fi
-
-# Enhanced FZF configuration for better fuzzy finding
-if command -v fzf >/dev/null 2>&1; then
-  # FZF default options for better appearance and functionality
-  export FZF_DEFAULT_OPTS="
-    --height=50%
-    --layout=reverse
-    --border
-    --preview-window=right:50%:wrap
-    --bind='ctrl-/:toggle-preview'
-    --bind='ctrl-u:preview-page-up'
-    --bind='ctrl-d:preview-page-down'
-    --color=bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8
-    --color=fg:#cdd6f4,header:#f38ba8,info:#cba6ac,pointer:#f5e0dc
-    --color=marker:#f5e0dc,fg+:#cdd6f4,prompt:#cba6ac,hl+:#f38ba8"
-
-  # Use fd for file searching if available, otherwise fallback to find
-  if command -v fd >/dev/null 2>&1; then
-    export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
-    export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-    export FZF_ALT_C_COMMAND='fd --type d --hidden --follow --exclude .git'
-  else
-    export FZF_DEFAULT_COMMAND='find . -type f -not -path "*/\.git/*"'
-    export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-    export FZF_ALT_C_COMMAND='find . -type d -not -path "*/\.git/*"'
-  fi
-
-  # File preview with bat or cat
-  if command -v bat >/dev/null 2>&1; then
-    export FZF_CTRL_T_OPTS="--preview 'bat --color=always --style=numbers --line-range=:500 {}'"
-  else
-    export FZF_CTRL_T_OPTS="--preview 'head -500 {}'"
-  fi
-
-  # Directory preview with tree or ls
-  if command -v tree >/dev/null 2>&1; then
-    export FZF_ALT_C_OPTS="--preview 'tree -C {} | head -200'"
-  else
-    export FZF_ALT_C_OPTS="--preview 'ls -la {}'"
-  fi
-fi
-
-# Allow unmatched patterns
-setopt +o nomatch
-
-# Enhanced history configuration
+# === CORE SETTINGS ===
+setopt EXTENDED_HISTORY HIST_EXPIRE_DUPS_FIRST HIST_IGNORE_ALL_DUPS
+setopt HIST_IGNORE_SPACE HIST_VERIFY SHARE_HISTORY
+setopt APPEND_HISTORY INC_APPEND_HISTORY HIST_FCNTL_LOCK
+setopt HIST_REDUCE_BLANKS HIST_SAVE_NO_DUPS
+setopt GLOB_DOTS NO_AUTO_MENU
+setopt AUTO_CD AUTO_PUSHD PUSHD_IGNORE_DUPS
+setopt INTERACTIVE_COMMENTS
 HISTFILE="$HOME/.zsh_history"
 HISTSIZE=50000
 SAVEHIST=50000
-setopt EXTENDED_HISTORY        # Record timestamp of command
-setopt HIST_EXPIRE_DUPS_FIRST  # Delete duplicates first when HISTFILE size exceeds HISTSIZE
-setopt HIST_IGNORE_DUPS        # Ignore duplicated commands history list
-setopt HIST_IGNORE_SPACE       # Ignore commands that start with space
-setopt HIST_VERIFY             # Show command with history expansion to user before running it
-setopt INC_APPEND_HISTORY      # Add commands to HISTFILE in order of execution
-setopt SHARE_HISTORY           # Share command history data between sessions
 
-# Ensure unique entries in path
-typeset -U path
+# --- Fast command check (native zsh) ---
+_has() { (( $+commands[$1] )) }
 
-# Define critical path components first
+# === PATH SETUP ===
+typeset -U path PATH
 path=(
-    $HOME/.local/bin        # Local user binaries
-    $path                   # Existing system paths
+  $HOME/.local/bin
+  $HOME/bin
+  /opt/homebrew/bin
+  /usr/local/bin
+  $path
 )
+# Add Go path only if it exists
+[[ -d "$HOME/go/bin" ]] && path=($HOME/go/bin $path)
 
-# Export critical env vars immediately
+# === ENVIRONMENT ===
 export GPG_TTY=$TTY
+export EDITOR=nvim
+export VISUAL=nvim
+export MISE_NODE_COREPACK=true
 
-# ==== PATH AND ENVIRONMENT SETUP ====
+# PAI System paths
+export PAI_HOME="$HOME"
+export PAI_DIR="$HOME/PAI"
+export PROJECTS_DIR="$HOME/Projects"
+export CONSULTING_DIR="$HOME/Consulting"
 
-# Source static path/env setup for instant startup
-[[ -f "$HOME/.zsh_paths_static" ]] && source "$HOME/.zsh_paths_static"
-
-# Source environment and secrets if present
-[[ -f "$HOME/.env.zsh" ]] && z4h source "$HOME/.env.zsh"
+# Source secrets if present (not compiled for security)
 [[ -f "$HOME/.secrets.zsh" ]] && source "$HOME/.secrets.zsh"
 
-# ==== DEFER KEY BINDINGS ====
+# direnv hook (early so cd/env takes effect before other hooks) - cached
+if _has direnv; then
+  _DIRENV_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/direnv_hook.zsh"
+  if [[ ! -f $_DIRENV_CACHE(#qNmh-168) ]]; then
+    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+    direnv hook zsh >| "$_DIRENV_CACHE"
+  fi
+  source "$_DIRENV_CACHE"
+fi
 
-# Create a simple function for key bindings
-function _setup_keys() {
-    z4h bindkey undo Ctrl+/   Shift+Tab
-    z4h bindkey redo Option+/
-    z4h bindkey z4h-cd-back    Shift+Left
-    z4h bindkey z4h-cd-forward Shift+Right
-    z4h bindkey z4h-cd-up      Shift+Up
-    z4h bindkey z4h-cd-down    Shift+Down
+# === COMPLETION SYSTEM ===
+# Enable menu select
+zmodload zsh/complist 2>/dev/null
 
-    # Autoload functions
-    autoload -Uz zmv
-
-    # Define functions
-    function md() { [[ $# == 1 ]] && mkdir -p -- "$1" && cd -- "$1" }
-    compdef _directories md
-
-    # Named directories
-    [[ -n "$z4h_win_home" ]] && hash -d w="$z4h_win_home"
+# Defer function
+autoload -Uz add-zsh-hook
+_defer() {
+  local body="$*"
+  add-zsh-hook -Uz precmd _defer_run
+  _defer_run() { add-zsh-hook -d precmd _defer_run; eval "$body"; unset -f _defer_run; }
 }
 
-# Defer key bindings setup
-zsh-defer _setup_keys
+# Fast compinit with versioned dump to avoid churn after upgrades
+autoload -Uz compinit
+_ZCOMP_DUMP="$HOME/.zcompdump-$ZSH_VERSION"
+if [[ -f $_ZCOMP_DUMP(#qNmh-168) ]]; then
+  compinit -C -d "$_ZCOMP_DUMP"
+else
+  compinit -d "$_ZCOMP_DUMP"
+fi
 
-# ==== DEFER ALIASES ====
-
-# Create a simple function for aliases
-function _setup_aliases() {
-    # General aliases
-    alias tree="tree -a -I .git"
-    alias ..="cd .."
-    alias p="pbpaste"
-    alias asdf="mise"
-    alias ff="fastfetch"
-    alias v="nvim"
-    alias tm="task-master" -- AI assisted project management CLI
-
-    # Smart directory navigation with zoxide
-    if command -v zoxide >/dev/null 2>&1; then
-        alias cd="z"
-        alias cdi="zi"  # Interactive directory selection
+# fzf-tab AFTER compinit (cached path lookup)
+_FZF_TAB_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/fzf_tab_path"
+if [[ -f "$_FZF_TAB_CACHE" ]]; then
+  source "$(cat "$_FZF_TAB_CACHE")" 2>/dev/null || rm -f "$_FZF_TAB_CACHE"
+else
+  for f in ~/.local/share/fzf-tab/fzf-tab.plugin.zsh \
+    /opt/homebrew/share/fzf-tab/fzf-tab.plugin.zsh \
+    /usr/share/fzf-tab/fzf-tab.plugin.zsh; do
+    if [[ -f $f ]]; then
+      echo "$f" > "$_FZF_TAB_CACHE"
+      source "$f"
+      break
     fi
+  done
+fi
 
-    # Enhanced history search and management
-    if command -v fzf >/dev/null 2>&1; then
-        # Search history with fzf
-        alias h="history | fzf --tac --no-sort"
-        alias hg="history | grep"
+# Better completion defaults
+zstyle ':completion:*' squeeze-slashes yes
+zstyle ':completion:*' verbose yes
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+zstyle ':completion:*' list-colors ${(s.:.)LS_COLORS}
+zstyle ':completion:*' rehash true
+zstyle ':completion:*' group-name ''
+zstyle ':completion:*' use-cache yes
+zstyle ':completion:*' cache-path "${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompcache"
+zstyle ':completion:*:descriptions' format '%F{242}%d%f'
+zstyle ':completion:*:messages'     format '%F{244}%d%f'
+zstyle ':completion:*:warnings'     format '%F{yellow}%d%f'
+zstyle ':completion:*:*:kill:*:processes' list-colors '=(#b) #([0-9]#) ([0-9a-z-]#)*=01;34=0=01'
 
-        # Custom history search function
-        fh() {
-            print -z $( ([ -n "$ZSH_NAME" ] && fc -l 1 || history) | fzf +s --tac | sed -E 's/ *[0-9]*\*? *//' | sed -E 's/\\/\\\\/g')
-        }
+# fzf-tab configuration
+zstyle ':fzf-tab:complete:cd:*' fzf-preview 'lsd -1 --color=always $realpath 2>/dev/null || ls -1 $realpath 2>/dev/null'
+zstyle ':fzf-tab:complete:*:*' fzf-preview 'bat --color=always --style=plain --line-range=:400 ${(Q)realpath} 2>/dev/null || head -n 400 ${(Q)realpath} 2>/dev/null || file -b ${(Q)realpath}'
 
-        # Search and execute from history
-        fhe() {
-            eval $( ([ -n "$ZSH_NAME" ] && fc -l 1 || history) | fzf +s --tac | sed -E 's/ *[0-9]*\*? *//' | sed -E 's/\\/\\\\/g')
-        }
-    fi
+# === TOOL INITIALIZATION ===
+# mise (fast version manager) - cached
+if [[ -x "$HOME/.local/bin/mise" ]]; then
+  _MISE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/mise_activate.zsh"
+  if [[ ! -f $_MISE_CACHE(#qNmh-168) ]]; then
+    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+    $HOME/.local/bin/mise activate zsh --shims >| "$_MISE_CACHE" 2>/dev/null || true
+  fi
+  source "$_MISE_CACHE"
+fi
 
-    # LSD aliases
-    alias l="lsd -lah"
-    alias ll="lsd -lh"
+# zoxide (smart cd) - cache the init output for performance
+_ZOX_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/zoxide_init.zsh"
+if _has zoxide; then
+  if [[ ! -f $_ZOX_CACHE(#qNmh-168) ]]; then
+    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+    zoxide init zsh >| "$_ZOX_CACHE"
+  fi
+  source "$_ZOX_CACHE"
+fi
 
-    # Git aliases
-    alias ga="git add"
-    alias gb="git branch"
-    alias gbd="git-branch-delete"
-    alias gc="git commit"
-    alias gco="git checkout"
-    alias gcm="git commit -m"
-    alias gd="git diff"
-    alias gf="git fetch --all"
-    alias gl="git log --oneline"
-    alias gp="git push"
-    alias gpl="git pull"
-    alias gs="git status"
-    alias gst="git stash"
-    alias gstp="git stash pop"
+# === KEY BINDINGS ===
+bindkey -e  # Emacs mode
+bindkey '^[[1;5D' backward-word  # Ctrl+Left
+bindkey '^[[1;5C' forward-word   # Ctrl+Right
+bindkey '^[[H' beginning-of-line # Home
+bindkey '^[[F' end-of-line       # End
+bindkey '^[[3~' delete-char      # Delete
+bindkey '^?' backward-delete-char # Backspace
+bindkey '^[[Z' reverse-menu-complete # Shift+Tab
 
-    # Enhanced git workflow functions
-    # Git status with enhanced formatting
-    gss() {
-        echo "📊 Repository Status:"
-        git status --short --branch
-        echo "\n🌿 Recent commits:"
-        git log --oneline -5
-        echo "\n📋 Working directory:"
-        git diff --stat
-    }
+# Word movement consistency (remove - and / from word chars)
+WORDCHARS='*?_[]~=&;!#$%^(){}<>'
 
-    # Interactive branch checkout with fzf
-    if command -v fzf >/dev/null 2>&1; then
-        gbb() {
-            local branches branch
-            branches=$(git branch --all | grep -v HEAD) &&
-            branch=$(echo "$branches" | fzf-tmux -d 15 +m) &&
-            git checkout $(echo "$branch" | sed "s/.* //" | sed "s#remotes/[^/]*/##")
-        }
+# === FUNCTIONS ===
+autoload -Uz zmv
 
-        # Interactive git log with fzf
-        glg() {
-            git log --graph --color=always \
-                --format="%C(auto)%h%d %s %C(black)%C(bold)%cr" "$@" |
-            fzf --ansi --no-sort --reverse --tiebreak=index \
-                --preview 'echo {} | grep -o "[a-f0-9]\{7\}" | head -1 | xargs git show --color=always' \
-                --bind "ctrl-m:execute:(echo {} | grep -o '[a-f0-9]\{7\}' | head -1 | xargs git show --color=always | less -R)"
-        }
-    fi
-
-    # Smart git add - stage files interactively
-    gai() {
-        if command -v fzf >/dev/null 2>&1; then
-            git status --porcelain | fzf -m --preview 'git diff --color=always {2}' | awk '{print $2}' | xargs git add
-        else
-            git add -i
-        fi
-    }
-
-    # Enhanced clipboard integration
-    # Copy current directory path
-    cpwd() { pwd | tr -d '\n' | pbcopy && echo "📋 Copied: $(pwd)" }
-
-    # Copy file contents with syntax highlighting info
-    cpf() {
-        if [[ -f "$1" ]]; then
-            cat "$1" | pbcopy
-            echo "📋 Copied contents of: $1"
-        else
-            echo "❌ File not found: $1"
-        fi
-    }
-
-    # Copy command output
-    cpo() { "$@" | pbcopy && echo "📋 Copied output of: $*" }
-
-    # Paste and execute (be careful!)
-    pex() {
-        echo "⚠️  About to execute from clipboard:"
-        pbpaste
-        echo "\n❓ Continue? (y/N)"
-        read -r confirm
-        [[ "$confirm" = "y" ]] && eval "$(pbpaste)"
-    }
-
-    # Project management helpers
-    # Quick project switcher with fzf
-    proj() {
-        local project_dirs=("$HOME/projects" "$HOME/dev" "$HOME/work" "$HOME/code")
-        local found_dirs=()
-
-        # Find existing project directories
-        for dir in "${project_dirs[@]}"; do
-            [[ -d "$dir" ]] && found_dirs+=("$dir")
-        done
-
-        if [[ ${#found_dirs[@]} -eq 0 ]]; then
-            echo "❌ No project directories found. Create ~/projects, ~/dev, ~/work, or ~/code"
-            return 1
-        fi
-
-        if command -v fzf >/dev/null 2>&1; then
-            local project=$(find "${found_dirs[@]}" -maxdepth 2 -type d -name ".git" | \
-                          sed 's|/.git||' | \
-                          fzf --preview 'ls -la {} && echo "\n📊 Git status:" && git -C {} status --short 2>/dev/null || echo "Not a git repo"')
-            [[ -n "$project" ]] && cd "$project"
-        else
-            echo "📁 Available project directories:"
-            find "${found_dirs[@]}" -maxdepth 2 -type d -name ".git" | sed 's|/.git||' | nl
-        fi
-    }
-
-    # Create new project with common structure
-    newproj() {
-        if [[ -z "$1" ]]; then
-            echo "Usage: newproj <project-name>"
-            return 1
-        fi
-
-        local project_dir="$HOME/projects/$1"
-        mkdir -p "$project_dir"/{src,docs,tests}
-        cd "$project_dir"
-
-        # Initialize git if available
-        if command -v git >/dev/null 2>&1; then
-            git init
-            echo "# $1\n\nProject created on $(date)" > README.md
-            echo "node_modules/\n.env\n.DS_Store\n*.log" > .gitignore
-            git add .
-            git commit -m "Initial commit: project structure"
-        fi
-
-        echo "🎉 Created project: $1"
-        echo "📍 Location: $project_dir"
-    }
-
-
-    # Add flags to existing aliases
-    alias ls="${aliases[ls]:-ls} -A"
-
-    # Compilation handled by _safe_zsh_compile function
+# Auto-list directory contents after cd, prefer fastest available
+chpwd() {
+  if (( $+commands[eza] )); then eza -lah --icons 2>/dev/null
+  elif (( $+commands[lsd] )); then lsd -lah 2>/dev/null
+  else ls -lah
+  fi
 }
 
-# Comprehensive system update function with explained steps
-function upa() {
-    local start_time=$SECONDS
-    echo "🚀 Starting comprehensive system update process..."
+# Create and enter directory
+md() { [[ $# == 1 ]] && mkdir -p -- "$1" && cd -- "$1" }
 
-    # Phase 1: Homebrew
-    upbrew
+# Copy working directory to clipboard
+cpwd() { pwd | tr -d '\n' | pbcopy }
 
-    # Phase 2: Development tools
-    updev
+# === ALIASES ===
+# Quick directory jumps
+alias ..="cd .."
+alias ...="cd ../.."
+alias ....="cd ../../.."
 
-    # Phase 3: CLI utilities
-    echo "\n🧰 Updating CLI utilities..."
-    echo "  ↳ Installing/updating fabric CLI tool via Go..."
-    go install github.com/danielmiessler/fabric@latest
-    echo "  ↳ Running fabric's self-update functionality..."
-    fabric -U
-    echo "  ↳ Installing/updating gofast CLI tool via Go..."
-    go install github.com/gofast-live/gofast-cli/cmd/gofast@latest
-    echo "  ↳ Self-updating crewai python env manager..."
-    uv tool install crewai --upgrade
+# Core utilities (Modern Rust-based tools)
+# eza - Modern ls replacement
+if _has eza; then
+  alias ls="eza --icons"
+  alias l="eza -lah --icons"
+  alias ll="eza -lh --icons"
+  alias la="eza -a --icons"
+  alias tree="eza --tree --icons"
+else
+  # Fallback to lsd if eza not available
+  alias l="lsd -lah"
+  alias ll="lsd -lh"
+fi
 
-    # Phase 4: Neovim/SpaceVim
-    upnvim
+# yazi - Modern file manager
+_has yazi && alias y="yazi"
 
-    # Phase 5: Terminal Enhancement Tools
-    echo "\n🚀 Updating terminal enhancement tools..."
-    echo "  ↳ Updating terminal productivity tools..."
-    # Update fzf if installed via git
-    if [[ -d "$HOME/.fzf" ]]; then
-        cd "$HOME/.fzf" && git pull && ./install --all
-        cd - > /dev/null
-    fi
-    # Update zoxide
-    if command -v zoxide >/dev/null 2>&1; then
-        echo "    ✓ zoxide managed by brew/mise"
-    fi
-    # Update other CLI tools via brew (bat, fd, tree, etc.)
-    echo "    ✓ CLI tools (bat, fd, tree, lsd) managed by brew"
+# Modern system tools
+_has procs && alias ps="procs"
+_has duf && alias df="duf"
+_has dust && alias du="dust"
 
-    # Phase 6: System Updates
-    echo "\n🍎 Checking system updates..."
-    echo "  ↳ Checking for macOS updates..."
-    softwareupdate -l 2>/dev/null | grep -q "No new software available" && echo "    ✓ macOS is up to date" || echo "    ⚠️  macOS updates available - run 'softwareupdate -ia' manually"
+# Editor and clipboard
+alias v="nvim"
+alias p="pbpaste"
+alias c="pbcopy"
 
-    # Phase 7: Shell environment
-    echo "\n🐚 Updating shell environment..."
-    echo "🔄 Regenerating static path file..."
-      {
-        GOROOT="$(mise where go 2>/dev/null || echo '')"
-        echo "export GOROOT=\"$GOROOT\""
-        echo "export GOPATH=\"$HOME/go\""
-        [[ -d "$HOME/go/bin" ]] && echo "path+=(\"$HOME/go/bin\")"
-        [[ -n "$GOROOT" && -d "$GOROOT/bin" ]] && echo "path+=(\"$GOROOT/bin\")"
-        brew_prefix=$(brew --prefix 2>/dev/null)
-        [[ -n "$brew_prefix" && -d "$brew_prefix/bin" ]] && echo "path+=(\"$brew_prefix/bin\")"
-        [[ -d "$HOME/bin" ]] && echo "path+=(\"$HOME/bin\")"
+# Claude AI
+alias claude="~/.claude/local/claude"
+alias cc="cd ~/PAI && claude"
 
-        # Homebrew PHP build vars
-        brew_openssl=$(brew --prefix openssl 2>/dev/null)
-        brew_libiconv=$(brew --prefix libiconv 2>/dev/null)
-        brew_libzip=$(brew --prefix libzip 2>/dev/null)
-        brew_bison=$(brew --prefix bison 2>/dev/null)
-        brew_re2c=$(brew --prefix re2c 2>/dev/null)
+# Zoxide aliases (optional cd replacement)
+# Set ZOXIDE_REPLACE_CD=1 in .zshenv to replace cd with z
+if _has zoxide; then
+  [[ "${ZOXIDE_REPLACE_CD}" == "1" ]] && alias cd="z"
+  (( $+functions[zi] )) && alias cdi="zi"
+  alias zz="z -"  # Go to previous directory
+fi
 
-        [[ -n "$brew_openssl" && -n "$brew_libiconv" ]] && \
-          echo "export LDFLAGS=\"-L$brew_openssl/lib -L$brew_libiconv/lib\""
-        [[ -n "$brew_openssl" && -n "$brew_libiconv" ]] && \
-          echo "export CPPFLAGS=\"-I$brew_openssl/include -I$brew_libiconv/include\""
-        [[ -n "$brew_openssl" && -n "$brew_libzip" ]] && \
-          echo "export PKG_CONFIG_PATH=\"$brew_openssl/lib/pkgconfig:$brew_libzip/lib/pkgconfig:\$PKG_CONFIG_PATH\""
-        [[ -n "$brew_bison" && -n "$brew_re2c" ]] && \
-          echo "path+=(\"$brew_bison/bin\" \"$brew_re2c/bin\")"
-          } > "$HOME/.zsh_paths_static"
-    echo "✅ Static path file updated!"
-    echo "  ↳ Compiling static path file for faster loading..."
-    zcompile "$HOME/.zsh_paths_static"
+# Git essentials
+alias g="git"
+alias ga="git add"
+alias gb="git branch"
+alias gc="git commit"
+alias gcm="git commit -m"
+alias gco="git checkout"
+alias gd="git diff"
+alias gf="git fetch --all"
+alias gl="git log --oneline --graph"
+alias gm="git merge"
+alias gp="git push"
+alias gpl="git pull"
+alias gs="git status"
+alias gst="git stash"
+alias gstp="git stash pop"
 
-    echo "  ↳ Updating zsh4humans framework..."
-    z4h update
+# === FZF CONFIGURATION ===
+if _has fzf; then
+  # Enhanced FZF options with Catppuccin colors and better UX
+  export FZF_DEFAULT_OPTS="
+    --height=50%
+    --layout=reverse
+    --border=rounded
+    --info=inline
+    --preview-window=right:60%:wrap
+    --bind='ctrl-/:toggle-preview'
+    --bind='ctrl-u:preview-page-up'
+    --bind='ctrl-d:preview-page-down'
+    --bind='ctrl-y:execute-silent(echo -n {+} | pbcopy)'
+    --color=fg:#cdd6f4,bg:#1e1e2e,hl:#f38ba8
+    --color=fg+:#cdd6f4,bg+:#313244,hl+:#f38ba8
+    --color=info:#cba6f7,prompt:#cba6f7,pointer:#f5e0dc
+    --color=marker:#f5e0dc,spinner:#f5e0dc,header:#f38ba8
+  "
 
-    # Phase 8: Cleanup
-    echo "\n🧹 Cleaning up..."
-    echo "  ↳ Cleaning npm cache..."
-    npm cache clean --force 2>/dev/null || echo "    ⚠️  npm cache clean skipped"
-    echo "  ↳ Cleaning pnpm cache..."
-    pnpm store prune 2>/dev/null || echo "    ⚠️  pnpm cache clean skipped"
-    echo "  ↳ Removing old zsh compiled files..."
-    find ~ -name "*.zwc" -mtime +30 -delete 2>/dev/null || true
-    echo "  ↳ Clearing temporary files..."
-    [[ -d "$HOME/.cache" ]] && find "$HOME/.cache" -type f -mtime +7 -delete 2>/dev/null || true
+  _FZF_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/fzf_zsh_init"
+  _FZF_VER_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/fzf_version"
 
-    # Phase 9: Summary
-    echo "\n✅ System update completed successfully!"
-    echo ""
-    echo "📊 Updated components:"
-    echo "  • Homebrew packages and definitions"
-    echo "  • Development tools (mise, corepack, pnpm, pip)"
-    echo "  • CLI utilities (fabric, gofast, crewai)"
-    echo "  • Neovim/SpaceVim framework and plugins"
-    echo "  • Terminal enhancement tools"
-    echo "  • Shell environment and static paths"
-    echo "  • System cleanup completed"
-    echo ""
-    echo "💡 Next steps:"
-    echo "  • Restart your terminal for optimal performance"
-    echo "  • Check for macOS updates: softwareupdate -l"
-    echo "  • Run 'zsh-bench' to measure performance improvements"
-    echo ""
-    echo "⏱️  Update completed in $((SECONDS - start_time))s"
+  # Cache fzf version separately to avoid running fzf --version every startup
+  if [[ -f "$_FZF_VER_CACHE"(#qNmh-168) ]]; then
+    _FZF_VER="$(cat "$_FZF_VER_CACHE")"
+  else
+    _FZF_VER="$(fzf --version 2>/dev/null | awk '{print $1}')"
+    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+    echo "$_FZF_VER" > "$_FZF_VER_CACHE"
+  fi
+
+  if [[ ! -f $_FZF_CACHE(#qNmh-168) ]] || ! grep -q "FZF_VERSION=$_FZF_VER" "$_FZF_CACHE" 2>/dev/null; then
+    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+    {
+      echo "FZF_VERSION=$_FZF_VER"
+      fzf --zsh
+    } >| "$_FZF_CACHE"
+  fi
+  source "$_FZF_CACHE"
+
+  # Better file/directory commands with fd
+  if _has fd; then
+    export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
+    export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+    export FZF_ALT_C_COMMAND='fd --type d --hidden --follow --exclude .git'
+  fi
+
+  # Enhanced previews with bat and eza
+  if _has bat && _has eza; then
+    export FZF_CTRL_T_OPTS="--preview 'bat -n --color=always {} 2>/dev/null || eza --tree --level=2 --color=always {} 2>/dev/null || cat {}'"
+    export FZF_ALT_C_OPTS="--preview 'eza --tree --level=2 --color=always --icons {} 2>/dev/null'"
+  elif _has bat; then
+    export FZF_CTRL_T_OPTS="--preview 'bat --color=always --style=numbers --line-range=:500 {}'"
+  fi
+
+  # Process search alias
+  alias fps='ps aux | fzf'
+fi
+
+# === LAZY LOADS ===
+# Load update functions only when needed
+up() {
+  source "$HOME/.config/zsh/updates.zsh" 2>/dev/null || {
+    echo "Error: updates.zsh not found"
+    return 1
+  }
+  up "$@"
 }
 
-# Individual update functions for specific components
-function upnvim() {
-    echo "🔧 Updating Neovim and SpaceVim..."
-    if [[ -d "$HOME/.SpaceVim" ]]; then
-        cd "$HOME/.SpaceVim" && git pull origin master
-        cd - > /dev/null
-        echo "  ↳ Updating SpaceVim plugins..."
-        nvim +SPUpdate +qall 2>/dev/null || echo "    ⚠️  SpaceVim plugin update skipped (nvim not available)"
-        echo "✅ Neovim/SpaceVim update completed!"
-    else
-        echo "❌ SpaceVim not found"
-    fi
+# Load project functions only when needed
+proj() {
+  source "$HOME/.config/zsh/projects.zsh" 2>/dev/null || {
+    echo "Error: projects.zsh not found"
+    return 1
+  }
+  proj "$@"
 }
 
-function updev() {
-    echo "🔧 Updating development tools..."
-    echo "  ↳ Upgrading mise-managed tools..."
-    mise upgrade
-    echo "  ↳ Self-updating mise..."
-    mise self-update -y
-    echo "  ↳ Updating corepack tools..."
-    corepack up
-    echo "  ↳ Updating global pnpm packages..."
-    pnpm update -g
-    echo "  ↳ Upgrading pip..."
-    pip install --upgrade pip
-    echo "✅ Development tools update completed!"
-}
-
-function upbrew() {
-    echo "📦 Updating Homebrew..."
-    echo "  ↳ Updating package definitions..."
-    brew update
-    echo "  ↳ Upgrading packages..."
-    brew upgrade
-    echo "  ↳ Cleaning up..."
-    brew cleanup
-    echo "✅ Homebrew update completed!"
-}
-
-function upquick() {
-    echo "⚡ Quick system update..."
-    brew update && brew upgrade
-    mise upgrade
-    pnpm update -g
-    echo "✅ Quick update completed!"
-}
-
-function upcheck() {
-    echo "🔍 Checking for available updates..."
-    echo "\n📦 Homebrew:"
-    brew outdated | head -5
-    echo "\n🔧 mise:"
-    mise outdated 2>/dev/null | head -5 || echo "  No outdated tools found"
-    echo "\n🐍 pnpm global:"
-    pnpm outdated -g 2>/dev/null | head -5 || echo "  No outdated packages found"
-    echo "\n🍎 macOS:"
-    softwareupdate -l 2>/dev/null | grep -q "No new software available" && echo "  ✓ Up to date" || echo "  Updates available"
-}
-
-# Defer aliases setup
-zsh-defer _setup_aliases
-
-# ==== IMPROVED LAZY LOADING FOR FABRIC ====
-
-# More efficient fabric lazy loading with nocorrect handling
-function fabric() {
-    unfunction fabric
-    if [[ -f "$HOME/.config/fabric/fabric-bootstrap.inc" ]]; then
-        . "$HOME/.config/fabric/fabric-bootstrap.inc"
-    fi
+# Fabric lazy load with error handling
+fabric() {
+  unfunction fabric 2>/dev/null
+  if [[ -f "$HOME/.config/fabric/fabric-bootstrap.inc" ]]; then
+    source "$HOME/.config/fabric/fabric-bootstrap.inc"
+  fi
+  if _has fabric; then
     command fabric "$@"
+  else
+    echo "Error: fabric not found in PATH" >&2
+    return 1
+  fi
 }
-# Prevent autocorrection for fabric
-alias fabric="nocorrect fabric"
 
-# ==== SET SHELL OPTIONS ====
+# Load Fabric helper functions (smart-commit, ai-commit, doc-code, get-todos)
+if [[ -f "$HOME/Projects/dotfiles/bin/fabric-helpers" ]]; then
+  source "$HOME/Projects/dotfiles/bin/fabric-helpers" >/dev/null 2>&1
+fi
 
-# These are lightweight and can stay immediate
-setopt glob_dots     # no special treatment for file names with a leading dot
-setopt no_auto_menu  # require an extra TAB press to open the completion menu
+# === AUTO SUGGESTIONS ===
+# Load zsh-autosuggestions if installed (cached path lookup)
+_AUTOSUGGEST_PATH_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/autosuggest_path"
+if [[ -f "$_AUTOSUGGEST_PATH_CACHE" ]]; then
+  _defer "source \"$(cat "$_AUTOSUGGEST_PATH_CACHE")\";
+          ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE=fg=244;
+          ZSH_AUTOSUGGEST_STRATEGY=(history completion);
+          bindkey '^ ' autosuggest-accept"
+else
+  for autosuggest_file in /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+                          /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+                          ~/.local/share/zsh-autosuggestions/zsh-autosuggestions.zsh; do
+    if [[ -f "$autosuggest_file" ]]; then
+      echo "$autosuggest_file" > "$_AUTOSUGGEST_PATH_CACHE"
+      _defer "source \"$autosuggest_file\";
+              ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE=fg=244;
+              ZSH_AUTOSUGGEST_STRATEGY=(history completion);
+              bindkey '^ ' autosuggest-accept"
+      break
+    fi
+  done
+fi
 
-# Display startup time when shell is ready
-zsh-defer -c 'if [[ -n "$SHELL_START_TIME" ]]; then
-    typeset -g SHELL_READY_TIME=$EPOCHREALTIME
-    echo "Shell startup time: $((($SHELL_READY_TIME - $SHELL_START_TIME) * 1000)) ms"
-fi'
+# === SYNTAX HIGHLIGHTING ===
+# Load syntax highlighting if installed (cached path lookup, must be near the end)
+_HIGHLIGHT_PATH_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/syntax_highlight_path"
+if [[ -f "$_HIGHLIGHT_PATH_CACHE" ]]; then
+  _defer "source \"$(cat "$_HIGHLIGHT_PATH_CACHE")\""
+else
+  for highlight_file in /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh \
+                        /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh \
+                        ~/.local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh; do
+    if [[ -f "$highlight_file" ]]; then
+      echo "$highlight_file" > "$_HIGHLIGHT_PATH_CACHE"
+      _defer "source \"$highlight_file\""
+      break
+    fi
+  done
+fi
 
-[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
+# === PROMPT ===
+# Starship prompt - Fast, cross-shell compatible (replaces P10k)
+# Performance target: <40ms like P10k
+if _has starship; then
+  eval "$(starship init zsh)"
+else
+  # Fallback to simple prompt if Starship not available
+  autoload -Uz vcs_info
+  precmd() { vcs_info }
+  zstyle ':vcs_info:git:*' formats ' %b'
+  setopt PROMPT_SUBST
+  PROMPT='%F{blue}%~%f%F{yellow}${vcs_info_msg_0_}%f
+%F{green}❯%f '
+fi
+
+# === MISC TOOLS ===
+# GitHub Copilot CLI aliases (cached check)
+if _has gh; then
+  GH_COPILOT_CHECK="${XDG_CACHE_HOME:-$HOME/.cache}/gh_copilot_check"
+  if [[ ! -f "$GH_COPILOT_CHECK"(#qNmh-168) ]]; then
+    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+    if gh extension list 2>/dev/null | grep -q -E '(^|/)copilot($|[\s:])'; then
+      : >| "$GH_COPILOT_CHECK"
+    else
+      rm -f "$GH_COPILOT_CHECK" 2>/dev/null
+    fi
+  fi
+  [[ -f "$GH_COPILOT_CHECK" ]] && eval "$(gh copilot alias -- zsh 2>/dev/null)"
+fi
+
+# === PERFORMANCE DEBUG (optional) ===
+# Uncomment to measure startup time
+# if [[ -n "$ZSH_STARTUP_TIME" ]]; then
+#   zprof
+# fi
