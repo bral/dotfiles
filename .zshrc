@@ -350,13 +350,18 @@ if _has fzf; then
 fi
 
 # === LAZY LOADS ===
-# Load update functions only when needed
+# System update function - calls optimized update-system script
 up() {
-  source "$HOME/.config/zsh/updates.zsh" 2>/dev/null || {
-    echo "Error: updates.zsh not found"
+  local cmd="${1:-full}"
+  # Map 'all' to 'full' for convenience
+  [[ "$cmd" == "all" ]] && cmd="full"
+
+  if [[ -x "$HOME/Projects/dotfiles/bin/update-system" ]]; then
+    "$HOME/Projects/dotfiles/bin/update-system" "$cmd"
+  else
+    echo "Error: update-system script not found or not executable"
     return 1
-  }
-  up "$@"
+  fi
 }
 
 # Load project functions only when needed
@@ -447,13 +452,9 @@ else
 fi
 
 # === MISC TOOLS ===
-# GitHub Copilot CLI aliases (cached for performance, saves ~30ms)
-if _has gh; then
-  # Only cache if gh copilot extension is installed
-  if gh extension list 2>/dev/null | grep -q -E '(^|/)copilot($|[\s:])'; then
-    _cache_eval "gh_copilot" "gh copilot alias -- zsh"
-  fi
-fi
+# GitHub Copilot CLI aliases (cached for performance)
+# Blindly attempt to cache - if extension is missing, cache file is empty (safe to source)
+_has gh && _cache_eval "gh_copilot" "gh copilot alias -- zsh"
 
 # === PERFORMANCE DEBUG (optional) ===
 # Uncomment to measure startup time
