@@ -93,8 +93,12 @@ ai-commit() {
   read -r REPLY
 
   if [[ $REPLY =~ ^[Yy]$ ]]; then
-    git commit -m "$message"
-    echo "✅ Committed successfully!"
+    if git commit -m "$message"; then
+      echo "✅ Committed successfully!"
+    else
+      echo "❌ Commit failed (pre-commit hook or other error)"
+      return 1
+    fi
   else
     echo "Commit cancelled"
     return 1

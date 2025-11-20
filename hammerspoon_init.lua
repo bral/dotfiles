@@ -126,7 +126,16 @@ local function focusWindow(w)
   if w:isMinimized() then w:unminimize() end
   local app = w:application()
   if app and app:isHidden() then app:unhide() end
-  return w:focus()
+  local success = w:focus()
+
+  -- Move mouse to center of focused window
+  if success then
+    local frame = w:frame()
+    local center = hs.geometry.point(frame.x + frame.w / 2, frame.y + frame.h / 2)
+    hs.mouse.setAbsolutePosition(center)
+  end
+
+  return success
 end
 
 local function cycleAppWindows(app)
