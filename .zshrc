@@ -255,7 +255,7 @@ export EZA_COLORS="reset:di=1;34:ln=1;36:so=1;35:pi=33:ex=1;32:bd=1;33:cd=1;33:s
 if _has eza; then
   alias ls="eza --icons --group-directories-first --no-user"
   l() {
-    eza -lah --icons --group-directories-first --no-user --total-size "$@"
+    eza -lah --icons --group-directories-first --no-user "$@"
   }
   alias ll="eza -lh --icons --group-directories-first --no-user"
   alias la="eza -a --icons --group-directories-first --no-user"
