@@ -278,6 +278,7 @@ _has dust && alias du="dust"
 alias v="nvim"
 alias p="pbpaste"
 alias c="pbcopy"
+alias gbd="git-branch-delete interactive"
 
 # Claude AI
 alias claude="~/.claude/local/claude"
