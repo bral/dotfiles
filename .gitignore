@@ -1,0 +1,33 @@
+# Sensitive Data - NEVER commit to public repos
+.claude/
+*.secret
+*.key
+*.pem
+.env
+.env.*
+
+# Backups
+*.backup
+*.backup.*
+
+# OS Files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+
+# Zsh
+.zcompdump*
+.zsh_history
+.zsh_sessions/
+
+# Mise
+.mise.local.toml
+
+# Temporary
+*.tmp
+*.swp
+*~
