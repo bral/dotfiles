@@ -6,8 +6,10 @@ if [[ ! -f ~/.zshrc.zwc || ~/.zshrc -nt ~/.zshrc.zwc ]]; then
   zcompile ~/.zshrc
 fi
 
-# Optimized zsh configuration - v3.0 (DEFERRED LOADING ARCHITECTURE)
-# Performance target: <10ms startup time (Ferrari engine, instant ignition)
+# Optimized zsh configuration - v3.1 (DEFERRED LOADING ARCHITECTURE)
+# Author: Brannon Lucas
+# Updated: 2024-11-24
+# Performance: ~18ms startup (~22ms with global rcs)
 # Architecture: "Micro-kernel" approach - heavy work moved to precmd or lazy load
 #
 # BENCHMARK THIS:
@@ -27,7 +29,7 @@ fi
 # - Environment variables
 # - Simple aliases and functions
 # - Key bindings
-# Total cost: ~5-10ms
+# Total cost: ~18ms (baseline zsh: ~7ms)
 
 # --- Early exit for non-interactive shells ---
 [[ -o interactive ]] || return
@@ -55,7 +57,8 @@ _cache_eval() {
   local cmd="$2"
   local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/${cmdname}_init.zsh"
 
-  # Refresh cache if missing or older than 7 days (#qNmh-168)
+  # Refresh cache if missing or older than 7 days
+  # Glob qualifier: #qNmh-168 = modified within 168 hours (7 days * 24h)
   if [[ ! -f "$cache_file"(#qNmh-168) ]]; then
     mkdir -p "$(dirname "$cache_file")"
     eval "$cmd" >| "$cache_file" 2>/dev/null
@@ -112,6 +115,8 @@ export PAI_HOME="$HOME"
 export PAI_DIR="$HOME/PAI"
 export PROJECTS_DIR="$HOME/Projects"
 export CONSULTING_DIR="$HOME/Consulting"
+export DOTFILES_DIR="$HOME/Projects/dotfiles"
+export ZSH_CONFIG_DIR="$HOME/.config/zsh"
 
 # Source secrets if present (not compiled for security)
 [[ -f "$HOME/.secrets.zsh" ]] && source "$HOME/.secrets.zsh"
@@ -191,8 +196,7 @@ if _has direnv; then
   _defer "_cache_eval 'direnv' 'direnv hook zsh'"
 fi
 
-# mise - REMOVED: shims already in PATH via ~/.zshenv line 29
-# The --shims flag produces no output (by design), making _cache_eval pointless
+# mise: shims handled via ~/.zshenv (no init needed here)
 
 # zoxide (deferred) - includes aliases after init
 if _has zoxide; then
@@ -215,30 +219,6 @@ else
   PROMPT='%F{blue}%~%f%F{yellow}${vcs_info_msg_0_}%f
 %F{green}❯%f '
 fi
-
-# === OPTIONAL: TRUE LAZY LOADERS (FIRST USE) ===
-# Uncomment these if you want even more aggressive optimization
-# These don't even run in precmd - they load on first use
-
-# Lazy mise (loads on first 'mise' command)
-# _lazy_mise() {
-#   unfunction _lazy_mise
-#   _cache_eval "mise" "$HOME/.local/bin/mise activate zsh --shims"
-#   mise "$@"
-# }
-# if [[ -x "$HOME/.local/bin/mise" ]]; then
-#   alias mise="_lazy_mise"
-# fi
-
-# Lazy direnv (loads on first 'cd')
-# if _has direnv; then
-#   _lazy_direnv() {
-#     unfunction _lazy_direnv
-#     _cache_eval "direnv" "direnv hook zsh"
-#   }
-#   autoload -Uz add-zsh-hook
-#   add-zsh-hook chpwd _lazy_direnv
-# fi
 
 # === KEY BINDINGS (STARTUP) ===
 bindkey -e  # Emacs mode
@@ -318,8 +298,8 @@ safe-rm() {
 # Auto-list directory contents after cd (disable with DISABLE_CHPWD_LS=1)
 chpwd() {
   [[ "${DISABLE_CHPWD_LS}" == "1" ]] && return
-  if (( $+commands[eza] )); then eza -lah --icons --group-directories-first --no-user 2>/dev/null
-  elif (( $+commands[lsd] )); then lsd -lah 2>/dev/null
+  if _has eza; then eza -lah --icons --group-directories-first --no-user 2>/dev/null
+  elif _has lsd; then lsd -lah 2>/dev/null
   else ls -lah
   fi
 }
@@ -389,12 +369,12 @@ else
 fi
 
 # Modern Rust-based tool aliases (consolidated _has checks)
-(( $+commands[yazi] )) && alias y="yazi"
-(( $+commands[procs] )) && alias ps="procs"
-(( $+commands[duf] )) && alias df="duf"
-(( $+commands[dust] )) && alias du="dust"
-(( $+commands[rg] )) && alias grep="rg"
-(( $+commands[trash] )) && alias del="trash"    # Preferred: macOS Trash (recoverable)
+_has yazi && alias y="yazi"
+_has procs && alias ps="procs"
+_has duf && alias df="duf"
+_has dust && alias du="dust"
+_has rg && alias grep="rg"
+_has trash && alias del="trash"  # Preferred: macOS Trash (recoverable)
 alias rm="safe-rm"                 # Protected rm with catastrophic pattern blocking
 
 # Editor and clipboard
@@ -407,8 +387,8 @@ alias gbd="git-branch-delete interactive"
 alias claude="~/.claude/local/claude"
 alias cc="cd ~/PAI && claude"
 
-# Zoxide aliases are set in the deferred zoxide init block below
-# Set ZOXIDE_REPLACE_CD=1 in .zshenv to replace cd with z
+# Zoxide aliases (cdi, zz) defined in deferred init block above
+# Set ZOXIDE_REPLACE_CD=1 in .zshenv to also replace cd with z
 
 # Git essentials
 alias g="git"
@@ -476,8 +456,8 @@ up() {
   # Map 'all' to 'full' for convenience
   [[ "$cmd" == "all" ]] && cmd="full"
 
-  if [[ -x "$HOME/Projects/dotfiles/bin/update-system" ]]; then
-    "$HOME/Projects/dotfiles/bin/update-system" "$cmd"
+  if [[ -x "$DOTFILES_DIR/bin/update-system" ]]; then
+    "$DOTFILES_DIR/bin/update-system" "$cmd"
   else
     echo "Error: update-system script not found or not executable"
     return 1
@@ -486,7 +466,7 @@ up() {
 
 # Load project functions only when needed
 proj() {
-  source "$HOME/.config/zsh/projects.zsh" 2>/dev/null || {
+  source "$ZSH_CONFIG_DIR/projects.zsh" 2>/dev/null || {
     echo "Error: projects.zsh not found"
     return 1
   }
@@ -511,7 +491,7 @@ fabric() {
 # Available: smart-commit, ai-commit, doc-code, get-todos, list-custom-patterns
 _load_fabric_helpers() {
   unfunction _load_fabric_helpers smart-commit ai-commit doc-code get-todos list-custom-patterns 2>/dev/null
-  source "$HOME/Projects/dotfiles/bin/fabric-helpers"
+  source "$DOTFILES_DIR/bin/fabric-helpers"
 }
 smart-commit() { _load_fabric_helpers; smart-commit "$@" }
 ai-commit() { _load_fabric_helpers; ai-commit "$@" }
@@ -548,11 +528,6 @@ _defer '
   [[ -f "$BREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]] && \
     source "$BREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
 '
-
-# === MISC TOOLS (DEFERRED) ===
-# GitHub Copilot CLI - REMOVED: extension not installed (gh copilot command doesn't exist)
-# To re-enable: gh extension install github/gh-copilot
-# Then add: _defer "_cache_eval 'gh_copilot' 'gh copilot alias -- zsh'"
 
 # === PERFORMANCE DEBUG (optional) ===
 # Uncomment to measure startup time
