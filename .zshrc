@@ -42,8 +42,8 @@ setopt GLOB_DOTS NO_AUTO_MENU
 setopt AUTO_CD AUTO_PUSHD PUSHD_IGNORE_DUPS
 setopt INTERACTIVE_COMMENTS
 HISTFILE="$HOME/.zsh_history"
-HISTSIZE=50000
-SAVEHIST=50000
+HISTSIZE=20000
+SAVEHIST=20000
 
 # === HELPER FUNCTIONS (STARTUP) ===
 # Fast command check (native zsh)
@@ -79,7 +79,7 @@ _run_deferred() {
   for cmd in "${_defer_cmds[@]}"; do
     eval "$cmd"
   done
-  unset _defer_cmds
+  unset _defer_cmds _defer_hook_added
 }
 
 # === PATH SETUP (STARTUP) ===
@@ -146,8 +146,7 @@ _defer '
   fi
 
   # Load fzf-tab plugin immediately after compinit
-  # Check multiple possible installation locations
-  BREW_PREFIX="${HOMEBREW_PREFIX:-/opt/homebrew}"
+  # Check multiple possible installation locations (BREW_PREFIX set at line 122)
   local fzf_tab_locations=(
     "$HOME/.local/share/fzf-tab/fzf-tab.plugin.zsh"
     "$BREW_PREFIX/share/fzf-tab/fzf-tab.plugin.zsh"
@@ -187,19 +186,20 @@ _defer '
 # === TOOL INITIALIZATION (DEFERRED) ===
 # All heavy tool hooks moved to precmd - invisible to hyperfine
 
-# direnv hook (deferred)
+# direnv hook (deferred - simpler and faster than lazy loading)
 if _has direnv; then
   _defer "_cache_eval 'direnv' 'direnv hook zsh'"
 fi
 
-# mise (deferred)
-if [[ -x "$HOME/.local/bin/mise" ]]; then
-  _defer "_cache_eval 'mise' '$HOME/.local/bin/mise activate zsh --shims'"
-fi
+# mise - REMOVED: shims already in PATH via ~/.zshenv line 29
+# The --shims flag produces no output (by design), making _cache_eval pointless
 
-# zoxide (deferred)
+# zoxide (deferred) - includes aliases after init
 if _has zoxide; then
-  _defer "_cache_eval 'zoxide' 'zoxide init zsh'"
+  _defer '_cache_eval "zoxide" "zoxide init zsh"
+    [[ "${ZOXIDE_REPLACE_CD}" == "1" ]] && alias cd="z"
+    alias cdi="zi"
+    alias zz="z -"'
 fi
 
 # starship prompt (deferred)
@@ -208,7 +208,8 @@ if _has starship; then
 else
   # Fallback to simple prompt if Starship not available
   autoload -Uz vcs_info
-  precmd() { vcs_info }
+  autoload -Uz add-zsh-hook
+  add-zsh-hook precmd vcs_info
   zstyle ':vcs_info:git:*' formats ' %b'
   setopt PROMPT_SUBST
   PROMPT='%F{blue}%~%f%F{yellow}${vcs_info_msg_0_}%f
@@ -257,6 +258,9 @@ autoload -Uz zmv
 
 # Safe rm - Blocks catastrophic patterns and suggests trash
 safe-rm() {
+  # Check for empty arguments
+  [[ $# -eq 0 ]] && { echo "Usage: rm <files>"; return 1; }
+
   local dangerous_patterns=(
     '/'
     '//'
@@ -311,8 +315,9 @@ safe-rm() {
   command rm "$@"
 }
 
-# Auto-list directory contents after cd, prefer fastest available
+# Auto-list directory contents after cd (disable with DISABLE_CHPWD_LS=1)
 chpwd() {
+  [[ "${DISABLE_CHPWD_LS}" == "1" ]] && return
   if (( $+commands[eza] )); then eza -lah --icons --group-directories-first --no-user 2>/dev/null
   elif (( $+commands[lsd] )); then lsd -lah 2>/dev/null
   else ls -lah
@@ -328,7 +333,7 @@ cpwd() { pwd | tr -d '\n' | pbcopy }
 # Copy file contents to clipboard
 cpf() {
   if [[ -f "$1" ]]; then
-    cat "$1" | pbcopy
+    pbcopy < "$1"
     echo "✓ Copied contents of $1"
   else
     echo "✗ '$1' is not a valid file"
@@ -367,10 +372,9 @@ alias ...="cd ../.."
 alias ....="cd ../../.."
 
 # Core utilities (Modern Rust-based tools)
-# eza - Modern ls replacement
-# Dracula theme colors for eza
-export EZA_COLORS="reset:di=1;34:ln=1;36:so=1;35:pi=33:ex=1;32:bd=1;33:cd=1;33:su=1;31:sg=1;31:tw=1;34:ow=1;34"
+# eza - Modern ls replacement with Dracula theme
 if _has eza; then
+  export EZA_COLORS="reset:di=1;34:ln=1;36:so=1;35:pi=33:ex=1;32:bd=1;33:cd=1;33:su=1;31:sg=1;31:tw=1;34:ow=1;34"
   alias ls="eza --icons --group-directories-first --no-user"
   l() {
     eza -lah --icons --group-directories-first --no-user "$@"
@@ -384,17 +388,13 @@ else
   alias ll="lsd -lh"
 fi
 
-# yazi - Modern file manager
-_has yazi && alias y="yazi"
-
-# Modern system tools
-_has procs && alias ps="procs"
-_has duf && alias df="duf"
-_has dust && alias du="dust"
-_has rg && alias grep="rg"
-
-# Safe deletion - trash for recoverable deletion, safe-rm with protections
-_has trash && alias del="trash"    # Preferred: move to macOS Trash (recoverable)
+# Modern Rust-based tool aliases (consolidated _has checks)
+(( $+commands[yazi] )) && alias y="yazi"
+(( $+commands[procs] )) && alias ps="procs"
+(( $+commands[duf] )) && alias df="duf"
+(( $+commands[dust] )) && alias du="dust"
+(( $+commands[rg] )) && alias grep="rg"
+(( $+commands[trash] )) && alias del="trash"    # Preferred: macOS Trash (recoverable)
 alias rm="safe-rm"                 # Protected rm with catastrophic pattern blocking
 
 # Editor and clipboard
@@ -407,13 +407,8 @@ alias gbd="git-branch-delete interactive"
 alias claude="~/.claude/local/claude"
 alias cc="cd ~/PAI && claude"
 
-# Zoxide aliases (optional cd replacement)
+# Zoxide aliases are set in the deferred zoxide init block below
 # Set ZOXIDE_REPLACE_CD=1 in .zshenv to replace cd with z
-if _has zoxide; then
-  [[ "${ZOXIDE_REPLACE_CD}" == "1" ]] && alias cd="z"
-  (( $+functions[zi] )) && alias cdi="zi"
-  alias zz="z -"  # Go to previous directory
-fi
 
 # Git essentials
 alias g="git"
@@ -434,7 +429,7 @@ alias gstp="git stash pop"
 
 # === FZF CONFIGURATION (DEFERRED) ===
 if _has fzf; then
-  # Enhanced FZF options with Dracula colors and better UX
+  # Enhanced FZF options with Dracula colors (fast export at startup)
   export FZF_DEFAULT_OPTS="
     --height=50%
     --layout=reverse
@@ -512,60 +507,52 @@ fabric() {
   fi
 }
 
-# Load Fabric helper functions (smart-commit, ai-commit, doc-code, get-todos)
-if [[ -f "$HOME/Projects/dotfiles/bin/fabric-helpers" ]]; then
-  source "$HOME/Projects/dotfiles/bin/fabric-helpers" >/dev/null 2>&1
-fi
+# Fabric helper functions - lazy loaded via wrapper
+# Available: smart-commit, ai-commit, doc-code, get-todos, list-custom-patterns
+_load_fabric_helpers() {
+  unfunction _load_fabric_helpers smart-commit ai-commit doc-code get-todos list-custom-patterns 2>/dev/null
+  source "$HOME/Projects/dotfiles/bin/fabric-helpers"
+}
+smart-commit() { _load_fabric_helpers; smart-commit "$@" }
+ai-commit() { _load_fabric_helpers; ai-commit "$@" }
+doc-code() { _load_fabric_helpers; doc-code "$@" }
+get-todos() { _load_fabric_helpers; get-todos "$@" }
+list-custom-patterns() { _load_fabric_helpers; list-custom-patterns "$@" }
 
-# === AUTO SUGGESTIONS (DEFERRED) ===
-# Load zsh-autosuggestions if installed - use known Brew location
-if [[ -f "$BREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]]; then
-  _defer "source '$BREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh';
-          ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE=fg=#6272a4;
-          ZSH_AUTOSUGGEST_STRATEGY=(history completion);
-          bindkey '^ ' autosuggest-accept"
-fi
+# === ZSH PLUGINS (DEFERRED) ===
+# Autosuggestions + Syntax highlighting loaded together (single defer, fewer file checks)
+# Dracula theme colors for syntax highlighting
+typeset -A ZSH_HIGHLIGHT_STYLES=(
+  [comment]='fg=#6272a4' [alias]='fg=#50fa7b,bold' [suffix-alias]='fg=#50fa7b,bold'
+  [global-alias]='fg=#50fa7b,bold' [function]='fg=#50fa7b,bold' [command]='fg=#50fa7b,bold'
+  [precommand]='fg=#50fa7b,bold,italic' [autodirectory]='fg=#ffb86c,italic'
+  [single-hyphen-option]='fg=#ffb86c' [double-hyphen-option]='fg=#ffb86c'
+  [back-quoted-argument]='fg=#bd93f9' [builtin]='fg=#8be9fd,bold'
+  [reserved-word]='fg=#8be9fd,bold' [hashed-command]='fg=#8be9fd,bold'
+  [commandseparator]='fg=#ff79c6' [command-substitution-delimiter]='fg=#f8f8f2'
+  [command-substitution-delimiter-unquoted]='fg=#f8f8f2'
+  [process-substitution-delimiter]='fg=#f8f8f2' [back-quoted-argument-delimiter]='fg=#ff79c6'
+  [back-double-quoted-argument]='fg=#ff79c6' [back-dollar-quoted-argument]='fg=#ff79c6'
+  [assign]='fg=#f8f8f2' [redirection]='fg=#f8f8f2' [arg0]='fg=#f8f8f2'
+  [default]='fg=#f8f8f2' [cursor]='standout'
+)
 
-# === SYNTAX HIGHLIGHTING (DEFERRED) ===
-# Dracula theme colors for zsh-syntax-highlighting
-typeset -A ZSH_HIGHLIGHT_STYLES
-ZSH_HIGHLIGHT_STYLES[comment]='fg=#6272a4'
-ZSH_HIGHLIGHT_STYLES[alias]='fg=#50fa7b,bold'
-ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=#50fa7b,bold'
-ZSH_HIGHLIGHT_STYLES[global-alias]='fg=#50fa7b,bold'
-ZSH_HIGHLIGHT_STYLES[function]='fg=#50fa7b,bold'
-ZSH_HIGHLIGHT_STYLES[command]='fg=#50fa7b,bold'
-ZSH_HIGHLIGHT_STYLES[precommand]='fg=#50fa7b,bold,italic'
-ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=#ffb86c,italic'
-ZSH_HIGHLIGHT_STYLES[single-hyphen-option]='fg=#ffb86c'
-ZSH_HIGHLIGHT_STYLES[double-hyphen-option]='fg=#ffb86c'
-ZSH_HIGHLIGHT_STYLES[back-quoted-argument]='fg=#bd93f9'
-ZSH_HIGHLIGHT_STYLES[builtin]='fg=#8be9fd,bold'
-ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=#8be9fd,bold'
-ZSH_HIGHLIGHT_STYLES[hashed-command]='fg=#8be9fd,bold'
-ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=#ff79c6'
-ZSH_HIGHLIGHT_STYLES[command-substitution-delimiter]='fg=#f8f8f2'
-ZSH_HIGHLIGHT_STYLES[command-substitution-delimiter-unquoted]='fg=#f8f8f2'
-ZSH_HIGHLIGHT_STYLES[process-substitution-delimiter]='fg=#f8f8f2'
-ZSH_HIGHLIGHT_STYLES[back-quoted-argument-delimiter]='fg=#ff79c6'
-ZSH_HIGHLIGHT_STYLES[back-double-quoted-argument]='fg=#ff79c6'
-ZSH_HIGHLIGHT_STYLES[back-dollar-quoted-argument]='fg=#ff79c6'
-ZSH_HIGHLIGHT_STYLES[assign]='fg=#f8f8f2'
-ZSH_HIGHLIGHT_STYLES[redirection]='fg=#f8f8f2'
-ZSH_HIGHLIGHT_STYLES[arg0]='fg=#f8f8f2'
-ZSH_HIGHLIGHT_STYLES[default]='fg=#f8f8f2'
-ZSH_HIGHLIGHT_STYLES[cursor]='standout'
-
-# Load syntax highlighting if installed - use known Brew location (must be near the end)
-if [[ -f "$BREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
-  _defer "source '$BREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh'"
-fi
+# Single defer for both plugins (syntax highlighting must be last)
+_defer '
+  [[ -f "$BREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] && {
+    source "$BREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+    ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE=fg=#6272a4
+    ZSH_AUTOSUGGEST_STRATEGY=(history completion)
+    bindkey "^ " autosuggest-accept
+  }
+  [[ -f "$BREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]] && \
+    source "$BREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+'
 
 # === MISC TOOLS (DEFERRED) ===
-# GitHub Copilot CLI aliases (deferred)
-if _has gh; then
-  _defer "_cache_eval 'gh_copilot' 'gh copilot alias -- zsh'"
-fi
+# GitHub Copilot CLI - REMOVED: extension not installed (gh copilot command doesn't exist)
+# To re-enable: gh extension install github/gh-copilot
+# Then add: _defer "_cache_eval 'gh_copilot' 'gh copilot alias -- zsh'"
 
 # === PERFORMANCE DEBUG (optional) ===
 # Uncomment to measure startup time

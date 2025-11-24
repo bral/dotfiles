@@ -65,17 +65,26 @@ ai-commit() {
   fi
 
   local staged_diff
-  staged_diff=$(git diff --cached)
+  # Exclude common large/generated files from diff sent to AI
+  staged_diff=$(git diff --cached -- . \
+    ':(exclude)package-lock.json' \
+    ':(exclude)pnpm-lock.yaml' \
+    ':(exclude)yarn.lock' \
+    ':(exclude)bun.lockb' \
+    ':(exclude)*.min.js' \
+    ':(exclude)*.min.css' \
+    ':(exclude)dist/**' \
+    ':(exclude)build/**')
 
   if [[ -z "$staged_diff" ]]; then
-    echo "Error: No staged changes to commit"
+    echo "Error: No staged changes to commit (or only excluded files)"
     echo "Use 'git add' to stage changes first"
     return 1
   fi
 
-  echo "Generating commit message..."
+  echo "Generating commit message with Claude 3.5 Haiku..."
   local message
-  message=$(echo "$staged_diff" | fabric --pattern smart_commit_message)
+  message=$(echo "$staged_diff" | fabric --pattern smart_commit_message --model claude-3-5-haiku-latest)
 
   if [[ -z "$message" ]]; then
     echo "Error: Failed to generate commit message"
@@ -93,6 +102,7 @@ ai-commit() {
   read -r REPLY
 
   if [[ $REPLY =~ ^[Yy]$ ]]; then
+    # Commit ALL staged files (not just the ones we analyzed)
     if git commit -m "$message"; then
       echo "✅ Committed successfully!"
     else
@@ -128,5 +138,5 @@ list-custom-patterns() {
   echo "  - get-todos <file>: Extract todos from a file or stdin"
 }
 
-# Export functions so they're available in the shell
-export -f smart-commit doc-code get-todos ai-commit list-custom-patterns
+# Note: Functions are automatically available when sourced by zsh
+# The bash-specific 'export -f' was removed as it's a no-op in zsh
