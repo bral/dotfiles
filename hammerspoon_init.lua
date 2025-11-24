@@ -1,39 +1,47 @@
--- === Config =================================================================
+-- Hammerspoon Configuration
+-- Author: Brannon Lucas
+-- Updated: 2024-11-24
+-- Features: Hyper-key app switching with window cycling, window tiling
 
+-- === Config =================================================================
 
 local appmod, winmod, timermod = hs.application, hs.window, hs.timer
 local hyper = {"cmd", "alt", "ctrl", "shift"}
+
+-- Timing constants
+local ALERT_DURATION = 0.6
+local ALERT_DURATION_ERROR = 0.8
+local ACTIVATION_TIMEOUT = 0.5
+local LAUNCH_FOCUS_DELAY = 0.25
+
+-- Performance settings
 hs.window.animationDuration = 0
 hs.application.enableSpotlightForNameSearches(false)
 
 
--- Bundle IDs
+-- Bundle IDs (Hyper + key to switch/launch)
 local apps = {
-  C = "com.apple.iCal",                    -- Calendar
-  -- C = "com.anthropic.claudefordesktop",              -- Claude
-  D = "com.hnc.Discord",                   -- Discord
-  -- F = "company.thebrowser.Browser",        -- Arc
-  F = "company.thebrowser.dia",            -- Dia
-  -- F = "com.apple.Safari",            -- Safari
-  I = "com.mitchellh.ghostty",             -- Ghostty
-  J = "com.tinyspeck.slackmacgap",         -- Slack
-  K = "com.electron.motion",               -- Motion
-  L = "com.superhuman.electron",           -- Superhuman
-  M = "com.apple.MobileSMS",               -- Messages
-  -- N = "notion.id",                         -- Notion
-  N = "com.apple.Notes",                   -- Notes
-  O = "md.obsidian",                       -- Obsidian
-  P = "com.spotify.client",                -- Spotify
-  U = "app.msty.app",                      -- Msty
-  V = "com.microsoft.VSCode",              -- VSCode
-  Z = "us.zoom.xos"                        -- Zoom
+  C = "com.apple.iCal",              -- Calendar
+  D = "com.hnc.Discord",             -- Discord
+  F = "company.thebrowser.dia",      -- Dia
+  I = "com.mitchellh.ghostty",       -- Ghostty
+  J = "com.tinyspeck.slackmacgap",   -- Slack
+  K = "com.electron.motion",         -- Motion
+  L = "com.superhuman.electron",     -- Superhuman
+  M = "com.apple.MobileSMS",         -- Messages
+  N = "com.apple.Notes",             -- Notes
+  O = "md.obsidian",                 -- Obsidian
+  P = "com.spotify.client",          -- Spotify
+  U = "app.msty.app",                -- Msty
+  V = "com.microsoft.VSCode",        -- VSCode
+  Z = "us.zoom.xos",                 -- Zoom
 }
 
 -- === Window ops =============================================================
 
 local function getFocusedWindow()
   local w = winmod.focusedWindow()
-  if not w then hs.alert.show("No focused window", 0.6) end
+  if not w then hs.alert.show("No focused window", ALERT_DURATION) end
   return w
 end
 
@@ -84,11 +92,13 @@ local function waitForActivation(app, callback, timeout)
 
   -- Set up application watcher for activation events
   local watcher, timer
+  local completed = false  -- Guard against double callback (race condition fix)
 
   watcher = hs.application.watcher.new(function(appName, eventType, appObject)
     -- Only respond to OUR app's activation event
     if appObject == app and eventType == hs.application.watcher.activated then
-      -- Cleanup BEFORE callback to prevent leaks even if callback errors
+      if completed then return end
+      completed = true
       if timer then timer:stop() end
       watcher:stop()
       callback()
@@ -99,7 +109,9 @@ local function waitForActivation(app, callback, timeout)
 
   -- Safety timeout: if activation never happens, try anyway after timeout
   -- This is a fallback - normal path is event-driven (fires at 50-150ms)
-  timer = timermod.doAfter(timeout or 0.5, function()
+  timer = timermod.doAfter(timeout or ACTIVATION_TIMEOUT, function()
+    if completed then return end
+    completed = true
     watcher:stop()
     callback()  -- Try anyway - partial success better than silent failure
   end)
@@ -132,7 +144,7 @@ local function focusWindow(w)
   if success then
     local frame = w:frame()
     local center = hs.geometry.point(frame.x + frame.w / 2, frame.y + frame.h / 2)
-    hs.mouse.setAbsolutePosition(center)
+    hs.mouse.absolutePosition(center)
   end
 
   return success
@@ -189,7 +201,7 @@ local function switchToApp(bundleId)
           local wins = collectWindows(app)
           if #wins > 0 then focusWindow(wins[1]) end
         end
-      end, 0.5)
+      end, ACTIVATION_TIMEOUT)
       return true
     end
   end
@@ -197,10 +209,10 @@ local function switchToApp(bundleId)
   -- Launch path: non-blocking nudge to focus a window after spawn
   local launched = appmod.launchOrFocusByBundleID(bundleId)
   if not launched then
-    hs.alert.show("Launch failed: " .. (bundleId or "?"), 0.8)
+    hs.alert.show("Launch failed: " .. (bundleId or "?"), ALERT_DURATION_ERROR)
     return false
   end
-  timermod.doAfter(0.25, function()
+  timermod.doAfter(LAUNCH_FOCUS_DELAY, function()
     local a = appmod.get(bundleId)
     if not a then return end
     local wins = collectWindows(a)
@@ -211,16 +223,21 @@ end
 
 -- === Utilities ==============================================================
 
-local function toggleConsole() hs.console.hswindow():focus() end
+local function toggleConsole()
+  local cw = hs.console.hswindow()
+  if cw then cw:focus() else hs.openConsole() end
+end
+
 local function reloadConfig() hs.reload() end
 
 local function showDiagnostics()
   local running = appmod.runningApplications()
+  local front = appmod.frontmostApplication()
   print("=== Hammerspoon Diagnostics ===")
   print(string.format("Running applications: %d", #running))
-  print("Frontmost app: " .. (appmod.frontmostApplication():name() or "?"))
+  print("Frontmost app: " .. (front and front:name() or "none"))
   print("Hotkeys active.")
-  hs.alert.show("Diagnostics -> Console", 0.6)
+  hs.alert.show("Diagnostics -> Console", ALERT_DURATION)
 end
 
 local function checkBundleIDs()
@@ -240,7 +257,7 @@ local function checkBundleIDs()
       print("  " .. a:name() .. " → " .. a:bundleID())
     end
   end
-  hs.alert.show("Bundle IDs -> Console", 0.6)
+  hs.alert.show("Bundle IDs -> Console", ALERT_DURATION)
 end
 
 -- === Hotkeys (no dupes on reload, repeat to cycle) ==========================
@@ -290,5 +307,5 @@ end
 -- === Init ===================================================================
 
 bindHotkeys()
-hs.alert.show("Hammerspoon Ready", 0.6)
+hs.alert.show("Hammerspoon Ready", ALERT_DURATION)
 print("Loaded. Hyper+8: Bundle IDs. Hyper+9: Diagnostics.")
