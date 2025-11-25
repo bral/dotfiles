@@ -1,42 +1,230 @@
 #!/usr/bin/env zsh
-# System Update Script v2.1 (Fail-Safe)
+# System Update Script v2.3 (Fail-Safe)
 # Parallelized updates with visible errors and graceful failure handling
-set -e
+VERSION="2.3"
+
+# Note: Intentionally not using `set -e` - subshells from async_run don't inherit it,
+# and all commands already have `|| warn` error handling.
 
 # Colors
 BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
 NC='\033[0m'
+
+# Spinner frames (braille pattern animation)
+SPINNER_FRAMES=(⣷ ⣯ ⣟ ⡿ ⢿ ⣻ ⣽ ⣾)
 
 info() { echo -e "${BLUE}ℹ${NC} $1"; }
 ok() { echo -e "${GREEN}✓${NC} $1"; }
 warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 error() { echo -e "${RED}✗${NC} $1" >&2; }
 
+# Run a command with animated spinner (for synchronous tasks)
+# Usage: spin_while "message" command [args...]
+spin_while() {
+    local msg=$1
+    shift
+    local logfile=$(mktemp)
+
+    # Run command in background
+    "$@" &>"$logfile" &
+    local cmd_pid=$!
+
+    # Hide cursor
+    printf '\033[?25l'
+
+    # Animate while command runs
+    local frame_idx=0
+    while kill -0 "$cmd_pid" 2>/dev/null; do
+        printf "\r${CYAN}${SPINNER_FRAMES[$((frame_idx % 8 + 1))]}${NC} %s" "$msg"
+        ((frame_idx++))
+        sleep 0.1
+    done
+
+    # Check exit status
+    wait "$cmd_pid"
+    local exit_code=$?
+
+    # Show cursor
+    printf '\033[?25h'
+
+    # Return result via global (zsh doesn't have good stdout capture)
+    SPIN_OUTPUT=$(cat "$logfile")
+    rm -f "$logfile"
+
+    return $exit_code
+}
+
 # PID storage for background tasks
 typeset -a PIDS
-typeset -A TASKS
+typeset -a TASK_NAMES
+typeset -A TASK_STATUS   # "running", "done", "failed"
+typeset -A TASK_LOGS     # temp file paths for output
+typeset -A TASK_CHANGES  # cached parsed update summaries
 
-# Helper to run function in background
+# Parse update output to extract what changed
+parse_updates() {
+    local name=$1
+    local logfile=$2
+    local updates=""
+
+    case "$name" in
+        *Homebrew*)
+            # Extract upgraded packages: "package 1.0 -> 2.0"
+            updates=$(grep -E "^==> Upgrading|already installed" "$logfile" 2>/dev/null | head -1)
+            if [[ -z "$updates" ]]; then
+                updates=$(grep -oE "^[a-z0-9_-]+ [0-9]" "$logfile" 2>/dev/null | wc -l | xargs)
+                [[ "$updates" -gt 0 ]] && updates="${updates} packages" || updates=""
+            fi
+            ;;
+        *Mise*)
+            # Extract upgraded runtimes
+            updates=$(grep -E "upgraded|installed" "$logfile" 2>/dev/null | head -3 | tr '\n' ', ' | sed 's/, $//')
+            ;;
+        *CLIs*)
+            # Combine pnpm, pipx, npm updates
+            local pnpm_updates=$(grep -E "^\+" "$logfile" 2>/dev/null | wc -l | xargs)
+            local pipx_updates=$(grep -E "upgraded|installed" "$logfile" 2>/dev/null | wc -l | xargs)
+            [[ "$pnpm_updates" -gt 0 ]] && updates="pnpm: ${pnpm_updates}"
+            [[ "$pipx_updates" -gt 0 ]] && updates="${updates:+$updates, }pipx: ${pipx_updates}"
+            ;;
+        *Go*)
+            # Check if anything was compiled
+            if grep -q "go: downloading" "$logfile" 2>/dev/null; then
+                updates="recompiled"
+            fi
+            ;;
+        *SpaceVim*)
+            # Check for plugin updates
+            local plugins=$(grep -c "Updating" "$logfile" 2>/dev/null)
+            [[ -n "$plugins" && "$plugins" -gt 0 ]] 2>/dev/null && updates="${plugins} plugins"
+            ;;
+    esac
+
+    echo "$updates"
+}
+
+# Helper to run function in background (output captured for clean spinners)
 async_run() {
     local func=$1
     local name=$2
-    info "Starting: $name..."
-    ( $func ) &
+    local logfile=$(mktemp)
+    ( $func ) &>"$logfile" &
     PIDS+=($!)
-    TASKS[$!]=$name
+    TASK_NAMES+=("$name")
+    TASK_STATUS[$!]="running"
+    TASK_LOGS[$!]="$logfile"
+}
+
+# Wait for all tasks with animated spinners
+wait_with_spinners() {
+    local num_tasks=${#PIDS[@]}
+    local frame_idx=0
+    local all_done=false
+
+    # Hide cursor during animation
+    printf '\033[?25l'
+    trap 'printf "\033[?25h"' EXIT INT TERM
+
+    # Print initial task lines
+    for name in "${TASK_NAMES[@]}"; do
+        printf "${CYAN}${SPINNER_FRAMES[1]}${NC} %s\n" "$name"
+    done
+
+    # Animate until all tasks complete
+    while [[ "$all_done" == "false" ]]; do
+        all_done=true
+
+        # Move cursor up to first task line and to column 0
+        printf "\033[${num_tasks}A\r"
+
+        for i in {1..${num_tasks}}; do
+            local pid=${PIDS[$i]}
+            local name=${TASK_NAMES[$i]}
+            local task_state=${TASK_STATUS[$pid]}
+
+            # Check if still running
+            if [[ "$task_state" == "running" ]]; then
+                if kill -0 "$pid" 2>/dev/null; then
+                    # Still running - show spinner
+                    all_done=false
+                    printf "${CYAN}${SPINNER_FRAMES[$((frame_idx % 8 + 1))]}${NC} %s\033[K\n" "$name"
+                else
+                    # Just finished - check exit status and cache results
+                    local logfile="${TASK_LOGS[$pid]}"
+                    if wait "$pid" 2>/dev/null; then
+                        TASK_STATUS[$pid]="done"
+                        TASK_CHANGES[$pid]=$(parse_updates "$name" "$logfile")
+                    else
+                        TASK_STATUS[$pid]="failed"
+                    fi
+                    # Print result
+                    if [[ "${TASK_STATUS[$pid]}" == "done" ]]; then
+                        local changes="${TASK_CHANGES[$pid]}"
+                        if [[ -n "$changes" ]]; then
+                            printf "${GREEN}✓${NC} %s ${DIM}%s${NC}\033[K\n" "$name" "$changes"
+                        else
+                            printf "${GREEN}✓${NC} %s ${DIM}up to date${NC}\033[K\n" "$name"
+                        fi
+                    else
+                        printf "${RED}✗${NC} %s ${DIM}failed${NC}\033[K\n" "$name"
+                    fi
+                fi
+            else
+                # Already completed - reprint cached status
+                if [[ "${TASK_STATUS[$pid]}" == "done" ]]; then
+                    local changes="${TASK_CHANGES[$pid]}"
+                    if [[ -n "$changes" ]]; then
+                        printf "${GREEN}✓${NC} %s ${DIM}%s${NC}\033[K\n" "$name" "$changes"
+                    else
+                        printf "${GREEN}✓${NC} %s ${DIM}up to date${NC}\033[K\n" "$name"
+                    fi
+                else
+                    printf "${RED}✗${NC} %s ${DIM}failed${NC}\033[K\n" "$name"
+                fi
+            fi
+        done
+
+        ((frame_idx++))
+        [[ "$all_done" == "false" ]] && sleep 0.1
+    done
+
+    # Show cursor again
+    printf '\033[?25h'
+    trap - EXIT INT TERM
+
+    # Count failures and show error logs
+    local fail_count=0
+    for pid in "${PIDS[@]}"; do
+        if [[ "${TASK_STATUS[$pid]}" == "failed" ]]; then
+            ((fail_count++))
+            local logfile="${TASK_LOGS[$pid]}"
+            if [[ -s "$logfile" ]]; then
+                echo ""
+                error "Output from ${TASK_NAMES[$PIDS[(Ie)$pid]]}:"
+                cat "$logfile" | head -20
+            fi
+        fi
+        # Cleanup temp file
+        rm -f "${TASK_LOGS[$pid]}"
+    done
+
+    return $fail_count
 }
 
 # --- Update Functions ---
 
 update_brew() {
     # Brew locks its own database, so it must run alone or alongside non-brew tasks
+    # Using --quiet to reduce output interleaving with parallel tasks
     if command -v brew &>/dev/null; then
-        brew update || warn "brew update failed"
-        brew upgrade || warn "brew upgrade failed"
-        brew cleanup || warn "brew cleanup failed"
+        brew update --quiet || warn "brew update failed"
+        brew upgrade --quiet || warn "brew upgrade failed"
+        brew cleanup --quiet || warn "brew cleanup failed"
     fi
 }
 
@@ -57,12 +245,9 @@ update_clis() {
         pnpm update -g || warn "pnpm update failed"
     fi
 
-    # 2. Python tools (pipx is better than global pip)
+    # 2. Python tools (pipx only - global pip fails on modern macOS)
     if command -v pipx &>/dev/null; then
         pipx upgrade-all --include-injected || warn "pipx upgrade failed"
-    elif command -v pip &>/dev/null; then
-        # Use sudo if not in a venv, or warn user
-        pip install -U pip || warn "pip update failed (permissions?)"
     fi
 
     # 3. Claude Code
@@ -75,10 +260,10 @@ update_clis() {
 
 update_go_tools() {
     # These compile from source, so they are slow. Run in background.
+    # 5 min timeout to prevent infinite hangs
     if command -v go &>/dev/null; then
-        # FIX: Point to /cmd/fabric (where the actual binary lives)
-        go install github.com/danielmiessler/fabric/cmd/fabric@latest || warn "Fabric install failed"
-        go install github.com/gofast-live/gofast-cli/cmd/gofast@latest || warn "GoFast install failed"
+        timeout 300 go install github.com/danielmiessler/fabric/cmd/fabric@latest || warn "Fabric install failed or timed out"
+        timeout 300 go install github.com/gofast-live/gofast-cli/cmd/gofast@latest || warn "GoFast install failed or timed out"
     fi
 }
 
@@ -86,51 +271,54 @@ update_spacevim() {
     if [[ -d "$HOME/.SpaceVim" ]]; then
         git -C "$HOME/.SpaceVim" pull || warn "SpaceVim git pull failed"
         # Only run nvim update if nvim exists (headless mode prevents UI hangs)
+        # 2 min timeout to prevent plugin update hangs
         if command -v nvim &>/dev/null; then
-             nvim --headless +SPUpdate +qall || warn "SpaceVim plugin update failed"
+             timeout 120 nvim --headless +SPUpdate +qall || warn "SpaceVim plugin update failed or timed out"
         fi
     fi
 }
 
 check_macos() {
-    if softwareupdate -l 2>/dev/null | grep -q "No new software"; then
-        ok "macOS up to date"
+    spin_while "Checking macOS updates" softwareupdate -l
+    if echo "$SPIN_OUTPUT" | grep -q "No new software"; then
+        printf "\r${GREEN}✓${NC} macOS up to date                    \n"
     else
-        warn "macOS updates available (Run: softwareupdate -i -a)"
+        printf "\r${YELLOW}⚠${NC} macOS updates available ${DIM}(softwareupdate -i -a)${NC}\n"
     fi
 }
 
 # --- Main Execution ---
 
 full_update() {
+    # Clear arrays to prevent stale PIDs from previous runs
+    PIDS=()
+    TASK_NAMES=()
+    TASK_STATUS=()
+    TASK_LOGS=()
+    TASK_CHANGES=()
+
     info "🚀 Starting Full System Update..."
     echo ""
 
     # 1. Start the heavy hitters in parallel
     # Brew is IO heavy, Go is CPU heavy. They usually play nice together.
-
     async_run update_brew "Homebrew (System Packages)"
     async_run update_mise "Mise (Runtimes)"
     async_run update_clis "CLIs (Node, Pipx, Claude)"
     async_run update_go_tools "Go Tools (Fabric, GoFast)"
     async_run update_spacevim "SpaceVim"
 
-    # 2. Wait for all to finish
-    local fail_count=0
-    for pid in ${PIDS}; do
-        if wait $pid; then
-            ok "${TASKS[$pid]} updated"
-        else
-            error "${TASKS[$pid]} failed"
-            ((fail_count++))
-        fi
-    done
+    # 2. Wait with animated spinners
+    wait_with_spinners
+    local fail_count=$?
 
-    # 3. macOS check (fast, synchronous)
+    # 3. macOS check (can be slow - network check)
     echo ""
     check_macos
 
+    # 4. Final summary
     echo ""
+    echo "─────────────────────────────────"
     if [[ $fail_count -eq 0 ]]; then
         ok "✨ System update complete!"
     else
@@ -139,20 +327,25 @@ full_update() {
 }
 
 quick_update() {
+    # Clear arrays to prevent stale PIDs from previous runs
+    PIDS=()
+    TASK_NAMES=()
+    TASK_STATUS=()
+    TASK_LOGS=()
+    TASK_CHANGES=()
+
     info "Running quick update (Brew + Mise only)..."
+    echo ""
+
     async_run update_brew "Homebrew"
     async_run update_mise "Mise"
 
-    local fail_count=0
-    for pid in ${PIDS}; do
-        if wait $pid; then
-            ok "${TASKS[$pid]} updated"
-        else
-            error "${TASKS[$pid]} failed"
-            ((fail_count++))
-        fi
-    done
+    # Wait with animated spinners
+    wait_with_spinners
+    local fail_count=$?
 
+    echo ""
+    echo "─────────────────────────────────"
     if [[ $fail_count -eq 0 ]]; then
         ok "Quick update complete"
     else
@@ -165,7 +358,7 @@ check_updates() {
     echo ""
 
     echo "Homebrew:"
-    brew outdated
+    command -v brew &>/dev/null && brew outdated || echo "brew not installed"
 
     echo ""
     echo "Mise:"
@@ -185,7 +378,7 @@ check_updates() {
 }
 
 show_help() {
-    echo "System Update Script v2.1"
+    echo "System Update Script v$VERSION"
     echo ""
     echo "Usage: $(basename $0) [full|quick|check|help]"
     echo ""
@@ -195,17 +388,19 @@ show_help() {
     echo "  check  - Show what needs updating"
     echo "  help   - Show this help message"
     echo ""
+    echo "Changes in v2.3:"
+    echo "  • Animated per-task spinners (⣷⣯⣟⡿⢿⣻⣽⣾)"
+    echo "  • Real-time status updates as tasks complete"
+    echo ""
+    echo "Changes in v2.2:"
+    echo "  • Removed set -e (conflicted with background subshells)"
+    echo "  • Added timeouts to prevent hung processes"
+    echo "  • Quieter brew output for cleaner parallel execution"
+    echo ""
     echo "Changes in v2.1:"
     echo "  • Improved error visibility - see what actually fails"
     echo "  • Fail-safe mode - one failure won't crash entire update"
     echo "  • Better error messages with specific failure reasons"
-    echo ""
-    echo "Changes in v2.0:"
-    echo "  • Parallelized updates (Brew + Mise + CLIs + Go + SpaceVim)"
-    echo "  • Removed FZF update (handled by Homebrew)"
-    echo "  • Removed Starship redundancy (handled by brew upgrade)"
-    echo "  • Added pipx support for Python tools"
-    echo "  • Fixed nvim headless mode"
 }
 
 # Argument handling
