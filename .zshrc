@@ -88,6 +88,7 @@ _run_deferred() {
 # === PATH SETUP (STARTUP) ===
 typeset -U path PATH
 path=(
+  $HOME/.local/share/mise/shims
   $HOME/.local/bin
   $HOME/bin
   /opt/homebrew/bin
@@ -534,3 +535,4 @@ _defer '
 # if [[ -n "$ZSH_STARTUP_TIME" ]]; then
 #   zprof
 # fi
+export PATH="$HOME/bin:$PATH"
