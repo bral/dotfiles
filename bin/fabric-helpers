@@ -64,7 +64,7 @@ ai-commit() {
     return 1
   fi
 
-  local staged_diff
+  local staged_diff max_chars=600000
   # Exclude common large/generated files from diff sent to AI
   staged_diff=$(git diff --cached -- . \
     ':(exclude)package-lock.json' \
@@ -80,6 +80,17 @@ ai-commit() {
     echo "Error: No staged changes to commit (or only excluded files)"
     echo "Use 'git add' to stage changes first"
     return 1
+  fi
+
+  # Check if diff is too large and needs preprocessing
+  local diff_size=${#staged_diff}
+  if (( diff_size > max_chars )); then
+    echo "Large diff detected (${diff_size} chars), preprocessing..."
+    staged_diff=$(echo "$staged_diff" | bun "$DOTFILES_DIR/bin/preprocess-diff.ts")
+    if [[ $? -ne 0 ]]; then
+      echo "Error: Preprocessing failed"
+      return 1
+    fi
   fi
 
   echo "Generating commit message with Claude 3.5 Haiku..."
