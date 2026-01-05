@@ -23,11 +23,13 @@ declare -A SYMLINKS=(
     ["$DOTFILES_DIR/.zshrc"]="$HOME/.zshrc"
     ["$DOTFILES_DIR/.zshenv"]="$HOME/.zshenv"
     ["$DOTFILES_DIR/hammerspoon_init.lua"]="$HOME/.hammerspoon/init.lua"
+    ["$DOTFILES_DIR/config/zsh/fzf-git-functions.zsh"]="$HOME/.config/zsh/fzf-git-functions.zsh"
 )
 
 create_symlinks() {
     info "Creating symlinks..."
     mkdir -p "$HOME/.hammerspoon"
+    mkdir -p "$HOME/.config/zsh"
 
     for source in "${!SYMLINKS[@]}"; do
         local target="${SYMLINKS[$source]}"

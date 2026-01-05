@@ -105,6 +105,11 @@ path=(
 export GPG_TTY=$TTY
 export MISE_NODE_COREPACK=true
 
+# XDG Base Directory Specification (standardized paths)
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+
 # Colored man pages using bat (if available)
 if _has bat; then
   export MANPAGER="sh -c 'col -bx | bat -l man -p'"
@@ -119,13 +124,31 @@ export CONSULTING_DIR="$HOME/Consulting"
 export DOTFILES_DIR="$HOME/Projects/dotfiles"
 export ZSH_CONFIG_DIR="$HOME/.config/zsh"
 
-# Source secrets if present (not compiled for security)
-[[ -f "$HOME/.secrets.zsh" ]] && source "$HOME/.secrets.zsh"
+# Source secrets if present (with permission verification)
+if [[ -f "$HOME/.secrets.zsh" ]]; then
+  # Verify file permissions are secure (600 = owner read/write only)
+  local perms=$(stat -f "%Lp" "$HOME/.secrets.zsh" 2>/dev/null || stat -c "%a" "$HOME/.secrets.zsh" 2>/dev/null)
+  if [[ "$perms" != "600" ]]; then
+    echo "⚠️  WARNING: ~/.secrets.zsh has insecure permissions ($perms). Should be 600."
+    echo "   Run: chmod 600 ~/.secrets.zsh"
+  fi
+  source "$HOME/.secrets.zsh"
+fi
 
 # === COMPLETION SYSTEM (DEFERRED) ===
 # Load compinit + fzf-tab together in precmd for proper initialization order
 autoload -Uz compinit
-BREW_PREFIX="${HOMEBREW_PREFIX:-/opt/homebrew}"
+
+# Detect Homebrew prefix (supports both Apple Silicon and Intel Macs)
+if [[ -n "$HOMEBREW_PREFIX" ]]; then
+  BREW_PREFIX="$HOMEBREW_PREFIX"
+elif [[ -d "/opt/homebrew" ]]; then
+  BREW_PREFIX="/opt/homebrew"  # Apple Silicon
+elif [[ -d "/usr/local/Homebrew" ]]; then
+  BREW_PREFIX="/usr/local"      # Intel Mac
+else
+  BREW_PREFIX=""
+fi
 
 # Enable menu select (lightweight, can stay at startup)
 zmodload zsh/complist 2>/dev/null
@@ -237,31 +260,32 @@ WORDCHARS='*?_[]~=&;!#$%^(){}<>'
 # === FUNCTIONS (STARTUP) ===
 autoload -Uz zmv
 
-# Safe rm - Blocks catastrophic patterns and suggests trash
+# Safe rm - Blocks catastrophic patterns, warns on recursive, suggests trash
 safe-rm() {
   # Check for empty arguments
   [[ $# -eq 0 ]] && { echo "Usage: rm <files>"; return 1; }
 
+  # Dry-run option
+  if [[ "$1" == "--dry-run" ]]; then
+    shift
+    echo "🔍 Would delete: $@"
+    return 0
+  fi
+
+  # Detect recursive flag (-r, -R, -rf, -fr, etc.)
+  local is_recursive=0
+  local args_without_flags=()
+  for arg in "$@"; do
+    if [[ "$arg" =~ ^-.*[rR] ]]; then
+      is_recursive=1
+    fi
+    [[ ! "$arg" =~ ^- ]] && args_without_flags+=("$arg")
+  done
+
   local dangerous_patterns=(
-    '/'
-    '//'
-    '/*'
-    '/.*'
-    '/bin'
-    '/boot'
-    '/dev'
-    '/etc'
-    '/lib'
-    '/proc'
-    '/root'
-    '/sbin'
-    '/sys'
-    '/usr'
-    '/var'
-    "$HOME"
-    "$HOME/"
-    "$HOME/*"
-    "$HOME/.*"
+    '/' '//' '/*' '/.*'
+    '/bin' '/boot' '/dev' '/etc' '/lib' '/proc' '/root' '/sbin' '/sys' '/usr' '/var'
+    "$HOME" "$HOME/" "$HOME/*" "$HOME/.*"
   )
 
   # Check each argument for dangerous patterns
@@ -292,13 +316,28 @@ safe-rm() {
     fi
   done
 
+  # Extra warning for recursive deletion of directories
+  if (( is_recursive )) && [[ ${#args_without_flags[@]} -gt 0 ]]; then
+    echo "⚠️  Recursive deletion detected: ${args_without_flags[*]}"
+    echo "💡 Consider using 'trash' for recoverable deletion"
+    read -q "REPLY?Continue with rm -r? (y/N) "
+    echo
+    [[ "$REPLY" != "y" ]] && return 1
+  fi
+
   # If all checks pass, run real rm
   command rm "$@"
 }
 
 # Auto-list directory contents after cd (disable with DISABLE_CHPWD_LS=1)
+# Skips auto-ls for directories with >500 files to prevent slow navigation
 chpwd() {
   [[ "${DISABLE_CHPWD_LS}" == "1" ]] && return
+
+  # Skip auto-ls for very large directories (>500 files)
+  local file_count=$(command ls -1A 2>/dev/null | command head -n 501 | wc -l)
+  (( file_count > 500 )) && { echo "📁 $(pwd) (${file_count}+ files - auto-ls skipped)"; return; }
+
   if _has eza; then eza -lah --icons --group-directories-first --no-user 2>/dev/null
   elif _has lsd; then lsd -lah 2>/dev/null
   else ls -lah
@@ -322,21 +361,21 @@ cpf() {
   fi
 }
 
-# Universal extract function
+# Universal extract function (with tool availability checks)
 extract() {
   if [[ -f "$1" ]]; then
     case "$1" in
-      *.tar.bz2)   tar xjf "$1"     ;;
-      *.tar.gz)    tar xzf "$1"     ;;
-      *.bz2)       bunzip2 "$1"     ;;
-      *.rar)       unrar e "$1"     ;;
-      *.gz)        gunzip "$1"      ;;
-      *.tar)       tar xf "$1"      ;;
-      *.tbz2)      tar xjf "$1"     ;;
-      *.tgz)       tar xzf "$1"     ;;
-      *.zip)       unzip "$1"       ;;
-      *.Z)         uncompress "$1"  ;;
-      *.7z)        7z x "$1"        ;;
+      *.tar.bz2)   _has tar      && tar xjf "$1"    || echo "✗ tar not found" ;;
+      *.tar.gz)    _has tar      && tar xzf "$1"    || echo "✗ tar not found" ;;
+      *.bz2)       _has bunzip2  && bunzip2 "$1"    || echo "✗ bunzip2 not found" ;;
+      *.rar)       _has unrar    && unrar e "$1"    || echo "✗ unrar not found (brew install unrar)" ;;
+      *.gz)        _has gunzip   && gunzip "$1"     || echo "✗ gunzip not found" ;;
+      *.tar)       _has tar      && tar xf "$1"     || echo "✗ tar not found" ;;
+      *.tbz2)      _has tar      && tar xjf "$1"    || echo "✗ tar not found" ;;
+      *.tgz)       _has tar      && tar xzf "$1"    || echo "✗ tar not found" ;;
+      *.zip)       _has unzip    && unzip "$1"      || echo "✗ unzip not found" ;;
+      *.Z)         _has uncompress && uncompress "$1" || echo "✗ uncompress not found" ;;
+      *.7z)        _has 7z       && 7z x "$1"       || echo "✗ 7z not found (brew install p7zip)" ;;
       *)           echo "✗ '$1' cannot be extracted via extract()" ;;
     esac
   else
@@ -345,6 +384,49 @@ extract() {
   fi
 }
 alias x="extract"
+
+# Zsh cache diagnostic function
+zsh-cache-info() {
+  local zcomp="$HOME/.zcompdump-$ZSH_VERSION"
+  if [[ -f "$zcomp" ]]; then
+    echo "📦 Completion cache: $zcomp"
+    echo "   Size: $(du -h "$zcomp" | cut -f1)"
+    echo "   Modified: $(stat -f "%Sm" "$zcomp" 2>/dev/null || stat -c "%y" "$zcomp" 2>/dev/null)"
+    local age=$(( ($(date +%s) - $(stat -f "%m" "$zcomp" 2>/dev/null || stat -c "%Y" "$zcomp" 2>/dev/null)) / 86400 ))
+    echo "   Age: ${age} days"
+    [[ -f "$zcomp.zwc" ]] && echo "   Compiled: ✓" || echo "   Compiled: ✗"
+  else
+    echo "No completion cache found"
+  fi
+}
+
+# Startup profiling aliases
+alias zsh-bench='hyperfine --warmup 3 "zsh -i -c exit"'
+alias zsh-profile='ZSH_STARTUP_TIME=1 zsh -i -c exit'
+
+# === FZF GIT FUNCTIONS (LAZY LOAD) ===
+# Comprehensive git operations with fzf - loads on first use for zero startup impact
+# Available: gbb gbd gbn gll gcp grb gaa grs gdd gss gtr grm gtt ghelp
+_load_fzf_git() {
+  unfunction gbb gbd gbn gll gcp grb gaa grs gdd gss gtr grm gtt ghelp _load_fzf_git 2>/dev/null
+  source "$HOME/.config/zsh/fzf-git-functions.zsh"
+}
+
+# Wrapper functions (replaced on first use)
+gbb()   { _load_fzf_git; fzf-git-branch "$@" }
+gbd()   { _load_fzf_git; fzf-git-branch-delete "$@" }
+gbn()   { _load_fzf_git; fzf-git-branch-new "$@" }
+gll()   { _load_fzf_git; fzf-git-log "$@" }
+gcp()   { _load_fzf_git; fzf-git-cherry-pick "$@" }
+grb()   { _load_fzf_git; fzf-git-rebase "$@" }
+gaa()   { _load_fzf_git; fzf-git-add "$@" }
+grs()   { _load_fzf_git; fzf-git-reset "$@" }
+gdd()   { _load_fzf_git; fzf-git-diff "$@" }
+gss()   { _load_fzf_git; fzf-git-stash "$@" }
+gtr()   { _load_fzf_git; fzf-git-track "$@" }
+grm()   { _load_fzf_git; fzf-git-remote "$@" }
+gtt()   { _load_fzf_git; fzf-git-tag "$@" }
+ghelp() { _load_fzf_git; fzf-git-help "$@" }
 
 # === ALIASES (STARTUP) ===
 # Quick directory jumps
@@ -382,7 +464,6 @@ alias rm="safe-rm"                 # Protected rm with catastrophic pattern bloc
 alias v="nvim"
 alias p="pbpaste"
 alias c="pbcopy"
-alias gbd="git-branch-delete interactive"
 
 # Claude AI
 alias claude="~/.claude/local/claude"
@@ -535,4 +616,3 @@ _defer '
 # if [[ -n "$ZSH_STARTUP_TIME" ]]; then
 #   zprof
 # fi
-export PATH="$HOME/bin:$PATH"
